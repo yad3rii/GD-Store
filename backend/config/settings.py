@@ -78,10 +78,10 @@ DATABASES = {
         "NAME": os.environ.get("DB_NAME", "gdstore"),
         "USER": os.environ.get("DB_USER", "sa"),
         "PASSWORD": os.environ.get("DB_PASSWORD", "YourStrong!Passw0rd"),
-        "HOST": os.environ.get("DB_HOST", "mssql"),
-        "PORT": os.environ.get("DB_PORT", "1433"),
+        "HOST": "localhost",
+        "PORT": "1433",
         "OPTIONS": {
-            "driver": "ODBC Driver 18 for SQL Server",
+            "driver": "ODBC Driver 17 for SQL Server",
             "extra_params": "TrustServerCertificate=yes;",
         },
     }
