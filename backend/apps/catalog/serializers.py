@@ -1,5 +1,13 @@
 from rest_framework import serializers
-from .models import Game, Genre, Tag, Screenshot, SystemRequirement
+from .models import (
+    Developer,
+    Game,
+    Genre,
+    Publisher,
+    Screenshot,
+    SystemRequirement,
+    Tag,
+)
 
 
 class GenreSerializer(serializers.ModelSerializer):
@@ -11,40 +19,92 @@ class GenreSerializer(serializers.ModelSerializer):
 class TagSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tag
-        fields = ["id", "name"]
+        fields = ["id", "name", "slug"]
+
+
+class DeveloperSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Developer
+        fields = ["id", "name", "slug", "website"]
+
+
+class PublisherSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Publisher
+        fields = ["id", "name", "slug", "website"]
 
 
 class ScreenshotSerializer(serializers.ModelSerializer):
     class Meta:
         model = Screenshot
-        fields = ["id", "image", "order"]
+        fields = ["id", "image", "caption"]
 
 
 class SystemRequirementSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemRequirement
-        fields = ["os", "cpu", "ram", "gpu", "storage"]
+        fields = [
+            "os",
+            "processor",
+            "memory",
+            "graphics",
+            "storage",
+            "additional_notes",
+        ]
 
 
 class GameListSerializer(serializers.ModelSerializer):
-    """Короткая карточка — для витрины/поиска."""
-    final_price = serializers.ReadOnlyField()
     genres = GenreSerializer(many=True, read_only=True)
+    tags = TagSerializer(many=True, read_only=True)
+    current_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, read_only=True
+    )
 
     class Meta:
         model = Game
-        fields = ["id", "title", "slug", "cover_image", "price",
-                  "discount_percent", "final_price", "genres"]
+        fields = [
+            "id",
+            "title",
+            "slug",
+            "cover_image",
+            "price",
+            "discount_percent",
+            "current_price",
+            "genres",
+            "tags",
+            "release_date",
+        ]
 
 
 class GameDetailSerializer(serializers.ModelSerializer):
-    """Полная карточка — страница игры."""
-    final_price = serializers.ReadOnlyField()
     genres = GenreSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
+    developers = DeveloperSerializer(many=True, read_only=True)
+    publishers = PublisherSerializer(many=True, read_only=True)
     screenshots = ScreenshotSerializer(many=True, read_only=True)
     requirements = SystemRequirementSerializer(read_only=True)
+    current_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, read_only=True
+    )
 
     class Meta:
         model = Game
-        fields = "__all__"
+        fields = [
+            "id",
+            "title",
+            "slug",
+            "description",
+            "short_description",
+            "cover_image",
+            "price",
+            "discount_percent",
+            "current_price",
+            "genres",
+            "tags",
+            "developers",
+            "publishers",
+            "screenshots",
+            "requirements",
+            "release_date",
+            "created_at",
+        ]
