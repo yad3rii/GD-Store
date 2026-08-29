@@ -38,7 +38,7 @@ class GameListSerializer(serializers.ModelSerializer):
 
 
 class GameDetailSerializer(serializers.ModelSerializer):
-    """Полная карточка — страница игры."""
+    """Полная карточка — страница игры (только чтение вложенных объектов)."""
     final_price = serializers.ReadOnlyField()
     genres = GenreSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
@@ -48,3 +48,21 @@ class GameDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Game
         fields = "__all__"
+
+
+class GameWriteSerializer(serializers.ModelSerializer):
+    """
+    Используется для create/update игры (только staff, см. GameViewSet).
+    В отличие от GameDetailSerializer, тут genres/tags/developers/publishers
+    можно реально задать при записи — просто списком id.
+    После сохранения ответ всё равно отдаём через GameDetailSerializer.
+    """
+
+    class Meta:
+        model = Game
+        fields = [
+            "id", "title", "slug", "short_description", "description", "cover_image",
+            "price", "discount_percent", "release_date",
+            "genres", "tags", "developers", "publishers", "is_published",
+        ]
+        read_only_fields = ["id"]

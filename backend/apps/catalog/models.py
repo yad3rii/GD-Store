@@ -1,4 +1,6 @@
 import uuid
+from decimal import Decimal
+from django.core.validators import MaxValueValidator
 from django.db import models
 
 
@@ -35,7 +37,7 @@ class Game(models.Model):
     cover_image = models.ImageField(upload_to="games/covers/", blank=True, null=True)
 
     price = models.DecimalField(max_digits=8, decimal_places=2)
-    discount_percent = models.PositiveSmallIntegerField(default=0)
+    discount_percent = models.PositiveSmallIntegerField(default=0, validators=[MaxValueValidator(100)])
     release_date = models.DateField(null=True, blank=True)
 
     genres = models.ManyToManyField(Genre, related_name="games", blank=True)
@@ -49,7 +51,12 @@ class Game(models.Model):
 
     @property
     def final_price(self):
-        return round(self.price * (1 - self.discount_percent / 100), 2)
+      
+        discount = Decimal(self.discount_percent) / Decimal(100)
+        return (self.price * (Decimal(1) - discount)).quantize(Decimal("0.01"))
+
+    class Meta:
+        ordering = ["-created_at"]
 
     def __str__(self):
         return self.title
