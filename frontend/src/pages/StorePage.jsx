@@ -2,7 +2,6 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getGames, getGenres } from "../api/catalog";
-import { demoMode } from "../data/demo";
 import GameCard from "../components/GameCard";
 import Price from "../components/Price";
 import Icon from "../components/Icon";
@@ -29,8 +28,7 @@ export default function StorePage() {
     page = Number(params.get("page") || 1);
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["games", search, genre, order, page],
-    queryFn: () =>
-      getGames({ search, genres__slug: genre, ordering: order, page }),
+    queryFn: () => getGames({ search, genres: genre, ordering: order, page }),
   });
   const { data: genreData } = useQuery({
     queryKey: ["genres"],
@@ -82,7 +80,7 @@ export default function StorePage() {
             >
               <option value="">Все жанры</option>
               {genres.map((g) => (
-                <option key={g.id} value={g.slug}>
+                <option key={g.id} value={g.id}>
                   {g.name}
                 </option>
               ))}
@@ -97,7 +95,7 @@ export default function StorePage() {
               <option value="">Рекомендуемые</option>
               <option value="price">Сначала дешевле</option>
               <option value="-price">Сначала дороже</option>
-              <option value="title">По названию</option>
+              <option value="-created_at">Сначала новые</option>
             </select>
           </label>
           {search && <span>Поиск: «{search}»</span>}
@@ -156,15 +154,9 @@ export default function StorePage() {
   return (
     <>
       <section className="hero" aria-label="Избранные игры">
-        <img
-          className="hero-art"
-          src={
-            demoMode && game.id === "1091500"
-              ? "/images/hero.jpg"
-              : game.cover_image
-          }
-          alt=""
-        />
+        {game.cover_image && (
+          <img className="hero-art" src={game.cover_image} alt="" />
+        )}
         <div className="hero-shade" />
         <div className="hero-content">
           <span className="hero-badge">
@@ -201,9 +193,9 @@ export default function StorePage() {
             onClick={() => setSlide(i)}
             aria-pressed={slide === i}
           >
-            <img src={g.cover_image} alt="" />
+            {g.cover_image && <img src={g.cover_image} alt="" />}
             <span>
-              <small>{i === 0 ? "Выбор редакции" : "Стоит поиграть"}</small>
+              <small>{"Стоит поиграть"}</small>
               <strong>{g.title}</strong>
             </span>
             <Icon name="chevron" size={17} />
@@ -249,7 +241,7 @@ export default function StorePage() {
           {genres.slice(0, 4).map((g, i) => (
             <Link
               key={g.id}
-              to={`/?view=catalog&genre=${encodeURIComponent(g.slug)}`}
+              to={`/?view=catalog&genre=${encodeURIComponent(g.id)}`}
             >
               <Icon name={["spark", "arrow", "grid", "user"][i]} size={25} />
               <strong>{g.name}</strong>

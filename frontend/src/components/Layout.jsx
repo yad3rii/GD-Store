@@ -2,7 +2,6 @@ import { Outlet, Link, NavLink, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { useAuthStore } from "../store/authStore";
 import Icon from "./Icon";
-import { demoMode } from "../data/demo";
 export default function Layout() {
   const { accessToken, logout } = useAuthStore();
   const [search, setSearch] = useState("");
@@ -41,10 +40,15 @@ export default function Layout() {
                 Выйти
               </button>
             ) : (
-              <Link className="account-button" to="/login">
-                <Icon name="user" />
-                Войти
-              </Link>
+              <>
+                <Link className="account-button" to="/login">
+                  <Icon name="user" />
+                  Войти
+                </Link>
+                <Link className="text-link" to="/register">
+                  Регистрация
+                </Link>
+              </>
             )}
           </div>
         </div>
@@ -56,7 +60,7 @@ export default function Layout() {
           <Link to="/?view=sale">
             Скидки <i className="tiny-dot" />
           </Link>
-          <Link to="/?view=catalog&genre=Ролевые">Категории</Link>
+          <Link to="/?view=catalog">Категории</Link>
         </nav>
         <form
           className="search"
@@ -84,11 +88,6 @@ export default function Layout() {
           GD STORE<span>Игра начинается здесь.</span>
         </Link>
         <div>
-          {demoMode && (
-            <p className="demo-note">
-              Демо-витрина · цены и предложения приведены для примера
-            </p>
-          )}
           <p>
             © {new Date().getFullYear()} GD Store. Изображения игр принадлежат
             их правообладателям.

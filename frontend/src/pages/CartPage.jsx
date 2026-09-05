@@ -1,7 +1,6 @@
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getCart, removeFromCart, checkout } from "../api/store";
-import { demoMode } from "../data/demo";
 import Price, { formatPrice } from "../components/Price";
 import Icon from "../components/Icon";
 export default function CartPage() {
@@ -72,18 +71,12 @@ export default function CartPage() {
             </div>
             <button
               className="button primary"
-              disabled={demoMode || order.isPending || order.isSuccess}
+              disabled={order.isPending || order.isSuccess}
               onClick={() => order.mutate()}
             >
               Оформить заказ <Icon name="arrow" />
             </button>
           </div>
-          {demoMode && (
-            <p className="demo-note" style={{ marginTop: 15 }}>
-              Демонстрационная корзина. Оплата появится после подключения
-              сервера.
-            </p>
-          )}
           {remove.isError && (
             <p role="alert" className="error-message">
               Не удалось удалить игру. Попробуйте снова.

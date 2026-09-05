@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { createServer } from "vite";
-let server, catalog, store;
+import {
+  validateRegistration,
+  registrationErrors,
+} from "../src/utils/registration.js";
+let server,
+  catalog,
+  store,
+  auth,
+  api,
+  requests = [],
+  response;
 before(async () => {
   globalThis.localStorage = {
     getItem: () => null,
@@ -13,45 +23,121 @@ before(async () => {
     server: { middlewareMode: true },
     appType: "custom",
   });
+  ({ api } = await server.ssrLoadModule("/src/api/client.js"));
+  api.defaults.adapter = async (config) => {
+    requests.push(config);
+    if (response instanceof Error) throw response;
+    return {
+      data: response,
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      config,
+    };
+  };
   catalog = await server.ssrLoadModule("/src/api/catalog.js");
   store = await server.ssrLoadModule("/src/api/store.js");
+  auth = await server.ssrLoadModule("/src/api/auth.js");
 });
 after(async () => {
   await server?.close();
   delete globalThis.localStorage;
 });
-test("catalog supports case-insensitive search and genre filtering", async () => {
-  assert.equal(
-    (await catalog.getGames({ search: "CYBERPUNK" })).results[0].slug,
-    "cyberpunk-2077",
+test("empty backend catalog stays empty and filters use the Django contract", async () => {
+  response = { results: [], count: 0, next: null, previous: null };
+  assert.deepEqual(
+    await catalog.getGames({
+      genres: "7",
+      search: "query",
+      ordering: "-created_at",
+    }),
+    response,
   );
-  const result = await catalog.getGames({ genres__slug: "Экшен" });
-  assert.ok(result.results.length);
+  assert.deepEqual(requests.at(-1).params, {
+    genres: "7",
+    search: "query",
+    ordering: "-created_at",
+  });
+  assert.equal(requests.at(-1).url, "/catalog/games/");
+});
+test("server failure is not replaced with demo games", async () => {
+  response = new Error("offline");
+  await assert.rejects(() => catalog.getGames(), /offline/);
+});
+test("cart and library use backend data and cart additions send a game ID", async () => {
+  response = { results: [] };
+  assert.deepEqual(await store.getCart(), response);
+  assert.equal(requests.at(-1).url, "/store/cart/");
+  await store.addToCart("server-game-id");
+  assert.deepEqual(JSON.parse(requests.at(-1).data), {
+    game: "server-game-id",
+  });
+  await store.getLibrary();
+  assert.equal(requests.at(-1).url, "/library/");
+});
+test("registration sends only fields accepted by Django", async () => {
+  response = { id: "created-user" };
+  const result = await auth.register({
+    username: "tester",
+    email: "test@example.com",
+    password: "sample-password",
+    confirmPassword: "sample-password",
+  });
+  assert.deepEqual(result, response);
+  assert.equal(requests.at(-1).url, "/auth/register/");
+  assert.deepEqual(JSON.parse(requests.at(-1).data), {
+    username: "tester",
+    email: "test@example.com",
+    password: "sample-password",
+  });
+});
+test("registration catches invalid fields and a mismatched password before submission", () => {
+  assert.deepEqual(
+    Object.keys(
+      validateRegistration({
+        username: " ",
+        email: "bad",
+        password: "short",
+        confirmPassword: "different",
+      }),
+    ),
+    ["username", "email", "password", "confirmPassword"],
+  );
+  assert.deepEqual(
+    validateRegistration({
+      username: "player",
+      email: "player@example.com",
+      password: "12345678",
+      confirmPassword: "12345678",
+    }),
+    {},
+  );
+});
+test("registration exposes field errors and handles offline or unstructured responses", () => {
+  assert.deepEqual(
+    registrationErrors({
+      response: {
+        data: {
+          username: ["Этот логин занят."],
+          email: ["Некорректный email."],
+        },
+      },
+    }),
+    { username: "Этот логин занят.", email: "Некорректный email." },
+  );
+  assert.equal(
+    registrationErrors({
+      response: { data: { non_field_errors: ["Регистрация закрыта."] } },
+    }).form,
+    "Регистрация закрыта.",
+  );
+  assert.ok(registrationErrors(new Error("offline")).form);
   assert.ok(
-    result.results.every((g) => g.genres.some((x) => x.slug === "Экшен")),
-  );
-  assert.equal(
-    (await catalog.getGames({ search: "not-a-real-game" })).count,
-    0,
+    registrationErrors({ response: { data: "<html>Unavailable</html>" } }).form,
   );
 });
-test("catalog sorts prices without mutating the default selection", async () => {
-  const before = await catalog.getGames();
-  const sorted = await catalog.getGames({ ordering: "price" });
-  assert.ok(sorted.results.every((g, i, a) => !i || a[i - 1].price <= g.price));
-  assert.deepEqual((await catalog.getGames()).results, before.results);
-});
-test("game lookup handles missing slugs", async () => {
-  await assert.rejects(() => catalog.getGame("missing"));
-});
-test("cart deduplicates additions, removes items and never processes demo payments", async () => {
-  const game = await catalog.getGame("cyberpunk-2077");
-  await store.addToCart(game.id);
-  await store.addToCart(game.id);
-  assert.equal((await store.getCart()).results.length, 1);
-  await assert.rejects(() => store.addToCart("missing"));
-  assert.equal((await store.getCart()).results.length, 1);
-  await assert.rejects(() => store.checkout());
-  await store.removeFromCart(game.id);
-  assert.equal((await store.getCart()).results.length, 0);
+
+test('registration does not report success for an HTML fallback page', async () => {
+  response = '<html>Frontend fallback</html>';
+  await assert.rejects(() => auth.register({username:'tester',email:'test@example.com',password:'sample-password'}), /Сервер не подтвердил/);
 });

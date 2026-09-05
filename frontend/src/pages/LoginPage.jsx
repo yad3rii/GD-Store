@@ -2,7 +2,6 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { login } from "../api/auth";
 import { useAuthStore } from "../store/authStore";
-import { demoMode } from "../data/demo";
 export default function LoginPage() {
   const [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
@@ -12,7 +11,6 @@ export default function LoginPage() {
     navigate = useNavigate();
   const submit = async (e) => {
     e.preventDefault();
-    if (demoMode) return;
     setPending(true);
     setError("");
     try {
@@ -29,11 +27,6 @@ export default function LoginPage() {
     <form className="auth-panel" onSubmit={submit}>
       <p className="eyebrow">С возвращением</p>
       <h1>Войти в GD Store</h1>
-      {demoMode && (
-        <p>
-          Демо-режим. Авторизация станет доступна после подключения сервера.
-        </p>
-      )}
       <label>
         Логин
         <input
@@ -58,9 +51,15 @@ export default function LoginPage() {
           {error}
         </p>
       )}
-      <button className="button primary" disabled={demoMode || pending}>
+      <button className="button primary" disabled={pending}>
         {pending ? "Входим…" : "Войти"}
       </button>
+      <p>
+        Нет аккаунта?{" "}
+        <Link to="/register" className="text-link">
+          Зарегистрироваться
+        </Link>
+      </p>
       <Link to="/" className="text-link">
         ← Вернуться в магазин
       </Link>
