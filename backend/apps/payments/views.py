@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import uuid
 
 from django.conf import settings
@@ -16,6 +17,9 @@ from apps.store.models import Order
 
 from .models import Payment
 from .serializers import CreatePaymentSerializer, PaymentSerializer, PaymentWebhookSerializer
+from .throttles import PaymentCreateThrottle
+
+logger = logging.getLogger(__name__)
 
 
 class CreatePaymentView(CreateAPIView):
@@ -29,6 +33,7 @@ class CreatePaymentView(CreateAPIView):
     """
     serializer_class = CreatePaymentSerializer
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [PaymentCreateThrottle]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -37,6 +42,10 @@ class CreatePaymentView(CreateAPIView):
         order = get_object_or_404(Order, id=serializer.validated_data["order_id"], user=request.user)
 
         if order.status != Order.STATUS_PENDING:
+            logger.warning(
+                "Payment create rejected: order %s in status %s (user %s)",
+                order.id, order.status, request.user.id,
+            )
             return Response(
                 {"detail": "Этот заказ уже обработан."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -55,6 +64,8 @@ class CreatePaymentView(CreateAPIView):
         payment.provider_payment_id = uuid.uuid4().hex  # TODO: заменить на id из ответа провайдера
         payment.save()
 
+        logger.info("Payment %s created for order %s (user %s)", payment.id, order.id, request.user.id)
+
         data = PaymentSerializer(payment).data
         # TODO: интеграция со Stripe/LiqPay — вернуть настоящий client_secret / checkout_url
         data["checkout_url"] = f"https://pay.example.com/{payment.provider}/{payment.provider_payment_id}"
@@ -65,11 +76,15 @@ class PaymentWebhookView(APIView):
     """
     POST /api/v1/payments/webhook/
     Сюда стучится платёжный провайдер. При успехе — помечаем Order оплаченным
-    и раскладываем игры по библиотеке пользователя.
+    и раскладываем игры по библиотеке получателя (обычно покупателя, но если это
+    подарок другу — Order.recipient).
 
     Подпись запроса проверяется по HMAC-SHA256 из заголовка X-Signature
     (тело запроса + settings.PAYMENT_WEBHOOK_SECRET). Если секрет не задан в settings —
     проверка пропускается (удобно для локальной разработки, но не для продакшена).
+
+    Без throttle_classes намеренно: это server-to-server endpoint, провайдер может слать
+    вебхуки достаточно часто, а от злоупотреблений его защищает проверка подписи.
     """
     permission_classes = [permissions.AllowAny]
 
@@ -80,6 +95,7 @@ class PaymentWebhookView(APIView):
         signature = request.headers.get("X-Signature", "")
         expected = hmac.new(secret.encode(), request.body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
+            logger.warning("Payment webhook rejected: bad signature")
             raise PermissionDenied("Неверная подпись webhook'а.")
 
     def post(self, request):
@@ -99,22 +115,26 @@ class PaymentWebhookView(APIView):
             # select_for_update + повторная проверка статуса — от повторных/параллельных вебхуков.
             payment = Payment.objects.select_for_update().get(pk=payment.pk)
             if payment.status == Payment.STATUS_SUCCEEDED:
+                logger.info("Payment webhook for %s ignored: already succeeded", payment.id)
                 return Response(status=status.HTTP_200_OK)  # уже обработан — идемпотентно ок
 
             payment.raw_payload = request.data
             payment.status = Payment.STATUS_SUCCEEDED if is_success else Payment.STATUS_FAILED
             payment.save()
 
+            order = payment.order
             if is_success:
-                order = payment.order
                 order.status = Order.STATUS_PAID
                 order.save(update_fields=["status"])
+                beneficiary = order.beneficiary
                 LibraryEntry.objects.bulk_create(
-                    [LibraryEntry(user=order.user, game=item.game) for item in order.items.all()],
+                    [LibraryEntry(user=beneficiary, game=item.game) for item in order.items.all()],
                     ignore_conflicts=True,
                 )
+                logger.info("Payment %s succeeded, order %s granted to user %s", payment.id, order.id, beneficiary.id)
             else:
-                payment.order.status = Order.STATUS_FAILED
-                payment.order.save(update_fields=["status"])
+                order.status = Order.STATUS_FAILED
+                order.save(update_fields=["status"])
+                logger.warning("Payment %s failed for order %s", payment.id, order.id)
 
         return Response(status=status.HTTP_200_OK)
