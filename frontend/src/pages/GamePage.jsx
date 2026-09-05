@@ -1,38 +1,87 @@
-import { useParams } from "react-router-dom";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { Link, useParams } from "react-router-dom";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getGame } from "../api/catalog";
 import { addToCart } from "../api/store";
-
+import Price from "../components/Price";
+import Icon from "../components/Icon";
 export default function GamePage() {
-  const { slug } = useParams();
-  const { data: game, isLoading } = useQuery({
-    queryKey: ["game", slug],
-    queryFn: () => getGame(slug),
+  const { slug } = useParams(),
+    qc = useQueryClient();
+  const {
+    data: game,
+    isLoading,
+    error,
+    refetch,
+  } = useQuery({ queryKey: ["game", slug], queryFn: () => getGame(slug) });
+  const add = useMutation({
+    mutationKey: ["add", slug],
+    mutationFn: () => addToCart(game.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["cart"] }),
   });
-  const addMutation = useMutation({ mutationFn: () => addToCart(game.id) });
-
-  if (isLoading) return <p>Загрузка...</p>;
-  if (!game) return <p>Игра не найдена</p>;
-
-  return (
-    <div className="max-w-3xl">
-      <h1 className="text-3xl font-bold">{game.title}</h1>
-      <p className="text-slate-400 mt-2">{game.short_description}</p>
-      <div className="grid grid-cols-3 gap-2 my-4">
-        {game.screenshots?.map((s) => (
-          <img key={s.id} src={s.image} className="rounded" />
-        ))}
+  if (isLoading)
+    return (
+      <div className="empty-state" role="status">
+        Загружаем игру…
       </div>
-      <p className="whitespace-pre-line">{game.description}</p>
-      <div className="mt-6 flex items-center gap-4">
-        <span className="text-xl font-semibold">{game.final_price} ₴</span>
-        <button
-          onClick={() => addMutation.mutate()}
-          className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded"
-        >
-          В корзину
+    );
+  if (error || !game)
+    return (
+      <div className="empty-state" role="alert">
+        <h1>Не удалось открыть игру</h1>
+        <button className="button" onClick={() => refetch()}>
+          Повторить
         </button>
+        <Link to="/">Вернуться в магазин</Link>
       </div>
-    </div>
+    );
+  return (
+    <>
+      <div className="detail-heading">
+        <Link className="breadcrumb" to="/">
+          Магазин /{" "}
+        </Link>
+        <h1>{game.title}</h1>
+      </div>
+      <div className="detail-grid">
+        <img
+          className="detail-image"
+          src={game.screenshots?.[0]?.image || game.cover_image}
+          alt={game.title}
+        />
+        <aside className="detail-panel">
+          <div className="hero-genres">
+            {game.genres?.map((g) => (
+              <span key={g.id}>{g.name}</span>
+            ))}
+          </div>
+          <h2>{game.title}</h2>
+          <p>{game.short_description}</p>
+          <Price game={game} />
+          <button
+            className="button primary"
+            disabled={add.isPending}
+            onClick={() => add.mutate()}
+          >
+            <Icon name="cart" />
+            {add.isPending ? "Добавляем…" : "Добавить в корзину"}
+          </button>
+          {add.isSuccess && (
+            <Link className="status-message" to="/cart" role="status">
+              Игра в корзине. Перейти →
+            </Link>
+          )}
+          {add.isError && (
+            <p className="error-message" role="alert">
+              Не удалось добавить игру. Проверьте, выполнен ли вход, и
+              попробуйте снова.
+            </p>
+          )}
+        </aside>
+      </div>
+      <section className="detail-description">
+        <h2>Об игре</h2>
+        <p>{game.description}</p>
+      </section>
+    </>
   );
 }

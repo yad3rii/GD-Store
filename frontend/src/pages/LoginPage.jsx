@@ -1,38 +1,69 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { login } from "../api/auth";
 import { useAuthStore } from "../store/authStore";
-
+import { demoMode } from "../data/demo";
 export default function LoginPage() {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const setTokens = useAuthStore((s) => s.setTokens);
-  const navigate = useNavigate();
-
-  const handleSubmit = async (e) => {
+  const [username, setUsername] = useState(""),
+    [password, setPassword] = useState(""),
+    [error, setError] = useState(""),
+    [pending, setPending] = useState(false);
+  const setTokens = useAuthStore((s) => s.setTokens),
+    navigate = useNavigate();
+  const submit = async (e) => {
     e.preventDefault();
-    const data = await login(username, password);
-    setTokens(data.access, data.refresh);
-    navigate("/");
+    if (demoMode) return;
+    setPending(true);
+    setError("");
+    try {
+      const data = await login(username, password);
+      setTokens(data.access, data.refresh);
+      navigate("/");
+    } catch {
+      setError("Не удалось войти. Проверьте данные и доступность сервера.");
+    } finally {
+      setPending(false);
+    }
   };
-
   return (
-    <form onSubmit={handleSubmit} className="max-w-sm flex flex-col gap-3">
-      <h1 className="text-2xl font-bold">Вход</h1>
-      <input
-        className="bg-slate-800 p-2 rounded"
-        placeholder="Логин"
-        value={username}
-        onChange={(e) => setUsername(e.target.value)}
-      />
-      <input
-        className="bg-slate-800 p-2 rounded"
-        type="password"
-        placeholder="Пароль"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-      />
-      <button className="bg-blue-600 hover:bg-blue-500 py-2 rounded">Войти</button>
+    <form className="auth-panel" onSubmit={submit}>
+      <p className="eyebrow">С возвращением</p>
+      <h1>Войти в GD Store</h1>
+      {demoMode && (
+        <p>
+          Демо-режим. Авторизация станет доступна после подключения сервера.
+        </p>
+      )}
+      <label>
+        Логин
+        <input
+          autoComplete="username"
+          required
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+      </label>
+      <label>
+        Пароль
+        <input
+          type="password"
+          autoComplete="current-password"
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </label>
+      {error && (
+        <p role="alert" className="error-message">
+          {error}
+        </p>
+      )}
+      <button className="button primary" disabled={demoMode || pending}>
+        {pending ? "Входим…" : "Войти"}
+      </button>
+      <Link to="/" className="text-link">
+        ← Вернуться в магазин
+      </Link>
     </form>
   );
 }
