@@ -9,10 +9,12 @@ class Payment(models.Model):
     STATUS_CREATED = "created"
     STATUS_SUCCEEDED = "succeeded"
     STATUS_FAILED = "failed"
+    STATUS_REFUNDED = "refunded"
     STATUS_CHOICES = [
         (STATUS_CREATED, "created"),
         (STATUS_SUCCEEDED, "succeeded"),
         (STATUS_FAILED, "failed"),
+        (STATUS_REFUNDED, "refunded"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
