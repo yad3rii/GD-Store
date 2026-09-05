@@ -19,46 +19,37 @@ class GenreSerializer(serializers.ModelSerializer):
 class TagSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tag
-        fields = ["id", "name", "slug"]
+        fields = ["id", "name"]
 
 
 class DeveloperSerializer(serializers.ModelSerializer):
     class Meta:
         model = Developer
-        fields = ["id", "name", "slug", "website"]
+        fields = ["id", "name"]
 
 
 class PublisherSerializer(serializers.ModelSerializer):
     class Meta:
         model = Publisher
-        fields = ["id", "name", "slug", "website"]
+        fields = ["id", "name"]
 
 
 class ScreenshotSerializer(serializers.ModelSerializer):
     class Meta:
         model = Screenshot
-        fields = ["id", "image", "caption"]
+        fields = ["id", "image", "order"]
 
 
 class SystemRequirementSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemRequirement
-        fields = [
-            "os",
-            "processor",
-            "memory",
-            "graphics",
-            "storage",
-            "additional_notes",
-        ]
+        fields = ["os", "cpu", "ram", "gpu", "storage"]
 
 
 class GameListSerializer(serializers.ModelSerializer):
     genres = GenreSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
-    current_price = serializers.DecimalField(
-        max_digits=10, decimal_places=2, read_only=True
-    )
+    final_price = serializers.ReadOnlyField()
 
     class Meta:
         model = Game
@@ -66,10 +57,11 @@ class GameListSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "slug",
+            "short_description",
             "cover_image",
             "price",
             "discount_percent",
-            "current_price",
+            "final_price",
             "genres",
             "tags",
             "release_date",
@@ -83,9 +75,7 @@ class GameDetailSerializer(serializers.ModelSerializer):
     publishers = PublisherSerializer(many=True, read_only=True)
     screenshots = ScreenshotSerializer(many=True, read_only=True)
     requirements = SystemRequirementSerializer(read_only=True)
-    current_price = serializers.DecimalField(
-        max_digits=10, decimal_places=2, read_only=True
-    )
+    final_price = serializers.ReadOnlyField()
 
     class Meta:
         model = Game
@@ -98,7 +88,7 @@ class GameDetailSerializer(serializers.ModelSerializer):
             "cover_image",
             "price",
             "discount_percent",
-            "current_price",
+            "final_price",
             "genres",
             "tags",
             "developers",
