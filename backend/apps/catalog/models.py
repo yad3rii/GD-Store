@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from decimal import Decimal
 
 
 class Genre(models.Model):
@@ -49,7 +50,8 @@ class Game(models.Model):
 
     @property
     def final_price(self):
-        return round(self.price * (1 - self.discount_percent / 100), 2)
+        discount = Decimal(self.discount_percent) / Decimal(100)
+        return round(self.price * (Decimal(1) - discount), 2)
 
     def __str__(self):
         return self.title

@@ -1,11 +1,13 @@
 from django.contrib import admin
-from .models import Game, Genre, Tag, Developer, Publisher, Screenshot, SystemRequirement
-
-admin.site.register(Genre)
-admin.site.register(Tag)
-admin.site.register(Developer)
-admin.site.register(Publisher)
-admin.site.register(SystemRequirement)
+from .models import (
+    Developer,
+    Game,
+    Genre,
+    Publisher,
+    Screenshot,
+    SystemRequirement,
+    Tag,
+)
 
 
 class ScreenshotInline(admin.TabularInline):
@@ -13,10 +15,26 @@ class ScreenshotInline(admin.TabularInline):
     extra = 1
 
 
+class SystemRequirementInline(admin.StackedInline):
+    model = SystemRequirement
+    extra = 0
+
+
 @admin.register(Game)
 class GameAdmin(admin.ModelAdmin):
     list_display = ["title", "price", "discount_percent", "is_published", "release_date"]
-    list_filter = ["is_published", "genres"]
-    search_fields = ["title"]
+    list_filter = ["is_published", "genres", "tags"]
+    search_fields = ["title", "description"]
     prepopulated_fields = {"slug": ("title",)}
-    inlines = [ScreenshotInline]
+    inlines = [ScreenshotInline, SystemRequirementInline]
+
+
+@admin.register(Genre)
+class GenreAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug"]
+    prepopulated_fields = {"slug": ("name",)}
+
+
+admin.site.register(Tag)
+admin.site.register(Developer)
+admin.site.register(Publisher)

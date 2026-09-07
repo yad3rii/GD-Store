@@ -1,5 +1,13 @@
 from rest_framework import serializers
-from .models import Game, Genre, Tag, Screenshot, SystemRequirement
+from .models import (
+    Developer,
+    Game,
+    Genre,
+    Publisher,
+    Screenshot,
+    SystemRequirement,
+    Tag,
+)
 
 
 class GenreSerializer(serializers.ModelSerializer):
@@ -11,6 +19,18 @@ class GenreSerializer(serializers.ModelSerializer):
 class TagSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tag
+        fields = ["id", "name"]
+
+
+class DeveloperSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Developer
+        fields = ["id", "name"]
+
+
+class PublisherSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Publisher
         fields = ["id", "name"]
 
 
@@ -27,24 +47,54 @@ class SystemRequirementSerializer(serializers.ModelSerializer):
 
 
 class GameListSerializer(serializers.ModelSerializer):
-    """Короткая карточка — для витрины/поиска."""
-    final_price = serializers.ReadOnlyField()
     genres = GenreSerializer(many=True, read_only=True)
+    tags = TagSerializer(many=True, read_only=True)
+    final_price = serializers.ReadOnlyField()
 
     class Meta:
         model = Game
-        fields = ["id", "title", "slug", "cover_image", "price",
-                  "discount_percent", "final_price", "genres"]
+        fields = [
+            "id",
+            "title",
+            "slug",
+            "short_description",
+            "cover_image",
+            "price",
+            "discount_percent",
+            "final_price",
+            "genres",
+            "tags",
+            "release_date",
+        ]
 
 
 class GameDetailSerializer(serializers.ModelSerializer):
-    """Полная карточка — страница игры."""
-    final_price = serializers.ReadOnlyField()
     genres = GenreSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
+    developers = DeveloperSerializer(many=True, read_only=True)
+    publishers = PublisherSerializer(many=True, read_only=True)
     screenshots = ScreenshotSerializer(many=True, read_only=True)
     requirements = SystemRequirementSerializer(read_only=True)
+    final_price = serializers.ReadOnlyField()
 
     class Meta:
         model = Game
-        fields = "__all__"
+        fields = [
+            "id",
+            "title",
+            "slug",
+            "description",
+            "short_description",
+            "cover_image",
+            "price",
+            "discount_percent",
+            "final_price",
+            "genres",
+            "tags",
+            "developers",
+            "publishers",
+            "screenshots",
+            "requirements",
+            "release_date",
+            "created_at",
+        ]
