@@ -1,4 +1,5 @@
 from rest_framework import serializers
+
 from .models import (
     Developer,
     Game,
@@ -43,7 +44,13 @@ class ScreenshotSerializer(serializers.ModelSerializer):
 class SystemRequirementSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemRequirement
-        fields = ["os", "cpu", "ram", "gpu", "storage"]
+        fields = [
+            "os",
+            "cpu",
+            "ram",
+            "gpu",
+            "storage",
+        ]
 
 
 class GameListSerializer(serializers.ModelSerializer):
@@ -83,18 +90,42 @@ class GameDetailSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "slug",
-            "description",
             "short_description",
+            "description",
             "cover_image",
             "price",
             "discount_percent",
             "final_price",
+            "release_date",
             "genres",
             "tags",
             "developers",
             "publishers",
             "screenshots",
             "requirements",
-            "release_date",
+            "is_published",
             "created_at",
+            "updated_at",
         ]
+
+
+class GameWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Game
+        fields = [
+            "id",
+            "title",
+            "slug",
+            "short_description",
+            "description",
+            "cover_image",
+            "price",
+            "discount_percent",
+            "release_date",
+            "genres",
+            "tags",
+            "developers",
+            "publishers",
+            "is_published",
+        ]
+        read_only_fields = ["id"]

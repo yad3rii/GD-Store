@@ -9,6 +9,7 @@ from .permissions import IsAdminOrReadOnly
 from .serializers import (
     GameDetailSerializer,
     GameListSerializer,
+    GameWriteSerializer,
     GenreSerializer,
     TagSerializer,
 )
@@ -21,42 +22,59 @@ class StandardResultsSetPagination(PageNumberPagination):
 
 
 class GameViewSet(viewsets.ModelViewSet):
-    """
-    GET /api/v1/catalog/games/ — список игр (с пагинацией, фильтрами, поиском)
-    GET /api/v1/catalog/games/<slug>/ — детальная страница игры
-    POST/PUT/DELETE — только для is_staff
-    """
-
-    queryset = (
-        Game.objects.filter(is_published=True)
-        .select_related("requirements")
-        .prefetch_related(
-            "genres", "tags", "developers", "publishers", "screenshots"
-        )
-        .order_by("-created_at")
-    )
     permission_classes = [IsAdminOrReadOnly]
     pagination_class = StandardResultsSetPagination
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+
     filterset_class = GameFilter
     search_fields = ["title", "short_description", "description"]
     ordering_fields = ["price", "release_date", "created_at"]
     lookup_field = "slug"
 
+    def get_queryset(self):
+        qs = (
+            Game.objects
+            .select_related("requirements")
+            .prefetch_related(
+                "genres",
+                "tags",
+                "developers",
+                "publishers",
+                "screenshots",
+            )
+            .order_by("-created_at")
+        )
+
+        user = self.request.user
+
+        if user and user.is_authenticated and user.is_staff:
+            return qs
+
+        return qs.filter(is_published=True)
+
     def get_serializer_class(self):
         if self.action == "retrieve":
             return GameDetailSerializer
+
+        if self.action in ("create", "update", "partial_update"):
+            return GameWriteSerializer
+
         return GameListSerializer
 
 
-class GenreViewSet(viewsets.ReadOnlyModelViewSet):
+class GenreViewSet(viewsets.ModelViewSet):
     queryset = Genre.objects.all()
     serializer_class = GenreSerializer
     permission_classes = [IsAdminOrReadOnly]
     lookup_field = "slug"
 
 
-class TagViewSet(viewsets.ReadOnlyModelViewSet):
+class TagViewSet(viewsets.ModelViewSet):
     queryset = Tag.objects.all()
     serializer_class = TagSerializer
     permission_classes = [IsAdminOrReadOnly]
