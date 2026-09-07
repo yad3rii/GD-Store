@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 
 from rest_framework import generics, permissions, status, viewsets
@@ -55,12 +55,34 @@ class FriendshipViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
 
-        return (
+        queryset = (
             Friendship.objects
             .filter(Q(from_user=user) | Q(to_user=user))
             .select_related("from_user", "to_user")
             .order_by("-created_at")
         )
+
+        status_value = self.request.query_params.get("status")
+
+        if status_value:
+            valid_statuses = {
+                value
+                for value, _label in Friendship.STATUS_CHOICES
+            }
+
+            if status_value not in valid_statuses:
+                raise ValidationError(
+                    {
+                        "status": (
+                            "Допустимые значения: "
+                            "pending, accepted, blocked."
+                        )
+                    }
+                )
+
+            queryset = queryset.filter(status=status_value)
+
+        return queryset
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -69,45 +91,123 @@ class FriendshipViewSet(viewsets.ModelViewSet):
         return FriendshipSerializer
 
     def create(self, request, *args, **kwargs):
-        del args, kwargs
-
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         to_user = serializer.validated_data["to_user"]
 
-        blocked = Friendship.objects.filter(
-            Q(from_user=request.user, to_user=to_user)
-            | Q(from_user=to_user, to_user=request.user),
-            status="blocked",
-        ).exists()
-
-        if blocked:
-            raise ValidationError(
-                "Невозможно отправить заявку: пользователь заблокирован."
+        with transaction.atomic():
+            # Блокируем обоих пользователей всегда в одном порядке.
+            # Это не даёт двум встречным заявкам создаться одновременно.
+            list(
+                User.objects
+                .select_for_update()
+                .filter(
+                    pk__in=[
+                        request.user.pk,
+                        to_user.pk,
+                    ]
+                )
+                .order_by("pk")
+                .values_list("pk", flat=True)
             )
 
-        reverse_request = Friendship.objects.filter(
-            from_user=to_user,
-            to_user=request.user,
-            status="pending",
-        ).first()
-
-        if reverse_request:
-            reverse_request.status = "accepted"
-            reverse_request.save(update_fields=["status"])
-
-            return Response(
-                FriendshipSerializer(reverse_request).data,
-                status=status.HTTP_200_OK,
+            relations = list(
+                Friendship.objects
+                .select_for_update()
+                .filter(
+                    Q(
+                        from_user=request.user,
+                        to_user=to_user,
+                    )
+                    | Q(
+                        from_user=to_user,
+                        to_user=request.user,
+                    )
+                )
             )
 
-        try:
-            friendship = serializer.save(from_user=request.user)
-        except IntegrityError as exc:
-            raise ValidationError(
-                "Заявка в друзья уже существует."
-            ) from exc
+            blocked = next(
+                (
+                    relation
+                    for relation in relations
+                    if relation.status == "blocked"
+                ),
+                None,
+            )
+
+            if blocked is not None:
+                raise ValidationError(
+                    "Невозможно отправить заявку: "
+                    "между пользователями есть блокировка."
+                )
+
+            accepted = next(
+                (
+                    relation
+                    for relation in relations
+                    if relation.status == "accepted"
+                ),
+                None,
+            )
+
+            if accepted is not None:
+                raise ValidationError(
+                    "Этот пользователь уже у вас в друзьях."
+                )
+
+            direct_pending = next(
+                (
+                    relation
+                    for relation in relations
+                    if (
+                        relation.from_user_id
+                        == request.user.pk
+                        and relation.status == "pending"
+                    )
+                ),
+                None,
+            )
+
+            if direct_pending is not None:
+                raise ValidationError(
+                    "Заявка этому пользователю уже существует."
+                )
+
+            reverse_pending = next(
+                (
+                    relation
+                    for relation in relations
+                    if (
+                        relation.from_user_id
+                        == to_user.pk
+                        and relation.status == "pending"
+                    )
+                ),
+                None,
+            )
+
+            if reverse_pending is not None:
+                reverse_pending.status = "accepted"
+                reverse_pending.save(
+                    update_fields=["status"]
+                )
+
+                return Response(
+                    FriendshipSerializer(
+                        reverse_pending
+                    ).data,
+                    status=status.HTTP_200_OK,
+                )
+
+            try:
+                friendship = serializer.save(
+                    from_user=request.user
+                )
+            except IntegrityError as exc:
+                raise ValidationError(
+                    "Заявка в друзья уже существует."
+                ) from exc
 
         return Response(
             FriendshipSerializer(friendship).data,
@@ -123,17 +223,26 @@ class FriendshipViewSet(viewsets.ModelViewSet):
         ],
     )
     def accept(self, _request, pk=None):
-        _ = pk
+        del pk
 
-        friendship = self.get_object()
+        friendship_id = self.get_object().pk
 
-        if friendship.status != "pending":
-            raise ValidationError(
-                "Можно принять только ожидающую заявку."
+        with transaction.atomic():
+            friendship = (
+                Friendship.objects
+                .select_for_update()
+                .get(pk=friendship_id)
             )
 
-        friendship.status = "accepted"
-        friendship.save(update_fields=["status"])
+            if friendship.status != "pending":
+                raise ValidationError(
+                    "Можно принять только ожидающую заявку."
+                )
+
+            friendship.status = "accepted"
+            friendship.save(
+                update_fields=["status"]
+            )
 
         return Response(
             FriendshipSerializer(friendship).data,
@@ -149,16 +258,23 @@ class FriendshipViewSet(viewsets.ModelViewSet):
         ],
     )
     def decline(self, _request, pk=None):
-        _ = pk
+        del pk
 
-        friendship = self.get_object()
+        friendship_id = self.get_object().pk
 
-        if friendship.status != "pending":
-            raise ValidationError(
-                "Можно отклонить только ожидающую заявку."
+        with transaction.atomic():
+            friendship = (
+                Friendship.objects
+                .select_for_update()
+                .get(pk=friendship_id)
             )
 
-        friendship.delete()
+            if friendship.status != "pending":
+                raise ValidationError(
+                    "Можно отклонить только ожидающую заявку."
+                )
+
+            friendship.delete()
 
         return Response(
             status=status.HTTP_204_NO_CONTENT
@@ -169,11 +285,21 @@ class FriendshipViewSet(viewsets.ModelViewSet):
         methods=["post"],
     )
     def block(self, _request, pk=None):
-        _ = pk
+        del pk
 
-        friendship = self.get_object()
-        friendship.status = "blocked"
-        friendship.save(update_fields=["status"])
+        friendship_id = self.get_object().pk
+
+        with transaction.atomic():
+            friendship = (
+                Friendship.objects
+                .select_for_update()
+                .get(pk=friendship_id)
+            )
+
+            friendship.status = "blocked"
+            friendship.save(
+                update_fields=["status"]
+            )
 
         return Response(
             FriendshipSerializer(friendship).data,

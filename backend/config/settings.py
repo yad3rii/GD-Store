@@ -1,16 +1,36 @@
-"""
-GD-Store settings.
-Использует mssql-django (пакет: mssql-django) как драйвер БД для MSSQL.
-"""
 import os
 from datetime import timedelta
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-change-me")
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
+# Загружаем backend/.env при локальном запуске.
+# В Docker значения из env_file также продолжат работать.
+load_dotenv(BASE_DIR / ".env")
+
+
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY",
+    "dev-secret-change-me",
+)
+
+DEBUG = os.environ.get(
+    "DJANGO_DEBUG",
+    "1",
+) == "1"
+
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get(
+        "DJANGO_ALLOWED_HOSTS",
+        "*",
+    ).split(",")
+    if host.strip()
+]
+
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -37,6 +57,7 @@ INSTALLED_APPS = [
     "apps.payments",
 ]
 
+
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
@@ -48,7 +69,9 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+
 ROOT_URLCONF = "config.urls"
+
 
 TEMPLATES = [
     {
@@ -66,59 +89,147 @@ TEMPLATES = [
     },
 ]
 
+
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
 AUTH_USER_MODEL = "accounts.User"
 
-# --- DATABASE (MSSQL через mssql-django) ---
+
+# --- DATABASE ---
+
+# Локально на Windows у тебя используется ODBC Driver 17.
+# В Docker устанавливается ODBC Driver 18.
+DEFAULT_DB_DRIVER = (
+    "ODBC Driver 17 for SQL Server"
+    if os.name == "nt"
+    else "ODBC Driver 18 for SQL Server"
+)
+
 DATABASES = {
     "default": {
         "ENGINE": "mssql",
-        "NAME": os.environ.get("DB_NAME", "gdstore"),
-        "USER": os.environ.get("DB_USER", "sa"),
-        "PASSWORD": os.environ.get("DB_PASSWORD", "YourStrong!Passw0rd"),
-        "HOST": "localhost",
-        "PORT": "1433",
+        "NAME": os.environ.get(
+            "DB_NAME",
+            "gdstore",
+        ),
+        "USER": os.environ.get(
+            "DB_USER",
+            "sa",
+        ),
+        "PASSWORD": os.environ.get(
+            "DB_PASSWORD",
+            "YourStrong!Passw0rd",
+        ),
+        "HOST": os.environ.get(
+            "DB_HOST",
+            "localhost",
+        ),
+        "PORT": os.environ.get(
+            "DB_PORT",
+            "1433",
+        ),
         "OPTIONS": {
-            "driver": "ODBC Driver 17 for SQL Server",
-            "extra_params": "TrustServerCertificate=yes;",
+            "driver": os.environ.get(
+                "DB_DRIVER",
+                DEFAULT_DB_DRIVER,
+            ),
+            "extra_params": os.environ.get(
+                "DB_EXTRA_PARAMS",
+                "TrustServerCertificate=yes;",
+            ),
         },
     }
 }
 
+
 AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    {
+        "NAME": (
+            "django.contrib.auth.password_validation."
+            "UserAttributeSimilarityValidator"
+        )
+    },
+    {
+        "NAME": (
+            "django.contrib.auth.password_validation."
+            "MinimumLengthValidator"
+        )
+    },
+    {
+        "NAME": (
+            "django.contrib.auth.password_validation."
+            "CommonPasswordValidator"
+        )
+    },
+    {
+        "NAME": (
+            "django.contrib.auth.password_validation."
+            "NumericPasswordValidator"
+        )
+    },
 ]
+
 
 LANGUAGE_CODE = "ru"
 TIME_ZONE = "Europe/Kyiv"
+
 USE_I18N = True
 USE_TZ = True
 
+
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+
 # --- DRF ---
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticatedOrReadOnly",
     ),
-    "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+
+    "DEFAULT_FILTER_BACKENDS": (
+        "django_filters.rest_framework.DjangoFilterBackend",
+    ),
+
+    "DEFAULT_PAGINATION_CLASS": (
+        "rest_framework.pagination.PageNumberPagination"
+    ),
+
     "PAGE_SIZE": 20,
-    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+
+    "DEFAULT_SCHEMA_CLASS": (
+        "drf_spectacular.openapi.AutoSchema"
+    ),
+
+    # Нужны существующим CheckoutThrottle,
+    # OrderActionThrottle и PaymentCreateThrottle.
+    "DEFAULT_THROTTLE_RATES": {
+        "checkout": os.environ.get(
+            "THROTTLE_CHECKOUT_RATE",
+            "10/min",
+        ),
+        "order_action": os.environ.get(
+            "THROTTLE_ORDER_ACTION_RATE",
+            "20/min",
+        ),
+        "payment_create": os.environ.get(
+            "THROTTLE_PAYMENT_CREATE_RATE",
+            "10/min",
+        ),
+    },
 }
+
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
@@ -126,9 +237,23 @@ SIMPLE_JWT = {
     "ROTATE_REFRESH_TOKENS": True,
 }
 
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    "CORS_ALLOWED_ORIGINS", "http://localhost:5173"
-).split(",")
+
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
+
+
+# Используется существующим PaymentWebhookView.
+PAYMENT_WEBHOOK_SECRET = os.environ.get(
+    "PAYMENT_WEBHOOK_SECRET",
+    "",
+)
+
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "GD-Store API",

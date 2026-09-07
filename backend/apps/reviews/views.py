@@ -1,26 +1,60 @@
-from rest_framework import viewsets, permissions
+from rest_framework import permissions, viewsets
+from rest_framework.exceptions import ValidationError
+
+from apps.library.models import LibraryEntry
+
 from .models import Review
+from .permissions import IsReviewOwnerOrReadOnly
 from .serializers import ReviewSerializer
 
 
 class ReviewViewSet(viewsets.ModelViewSet):
-    """
-    GET  /api/v1/reviews/?game=<id>  — отзывы к игре
-    POST /api/v1/reviews/            — оставить отзыв (только если игра в библиотеке — проверить в perform_create)
-    """
     serializer_class = ReviewSerializer
+    permission_classes = [
+        permissions.IsAuthenticatedOrReadOnly,
+        IsReviewOwnerOrReadOnly,
+    ]
     filterset_fields = ["game"]
 
-    def get_permissions(self):
-        if self.action in ["list", "retrieve"]:
-            return [permissions.AllowAny()]
-        return [permissions.IsAuthenticated()]
-
     def get_queryset(self):
-        qs = Review.objects.select_related("user", "game")
-        game_id = self.request.query_params.get("game")
-        return qs.filter(game_id=game_id) if game_id else qs
+        return Review.objects.select_related(
+            "user",
+            "game",
+        ).order_by("-created_at")
 
     def perform_create(self, serializer):
-        # TODO: проверить apps.library.LibraryEntry.objects.filter(user=..., game=...).exists()
-        serializer.save(user=self.request.user)
+        user = self.request.user
+        game = serializer.validated_data["game"]
+
+        library_entry = LibraryEntry.objects.filter(
+            user=user,
+            game=game,
+        ).first()
+
+        if library_entry is None:
+            raise ValidationError(
+                {
+                    "game": (
+                        "Нельзя оставить отзыв на игру, "
+                        "которой нет в вашей библиотеке."
+                    )
+                }
+            )
+
+        if Review.objects.filter(
+            user=user,
+            game=game,
+        ).exists():
+            raise ValidationError(
+                {
+                    "game": (
+                        "Вы уже оставили отзыв "
+                        "на эту игру."
+                    )
+                }
+            )
+
+        serializer.save(
+            user=user,
+            playtime_at_review=library_entry.playtime_minutes,
+        )

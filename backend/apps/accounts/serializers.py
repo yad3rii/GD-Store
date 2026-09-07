@@ -88,15 +88,49 @@ class FriendRequestCreateSerializer(serializers.ModelSerializer):
         return to_user
 
     def validate(self, attrs):
-        request_user = self.context["request"].user
-        to_user = attrs["to_user"]
+            request_user = self.context["request"].user
+            to_user = attrs["to_user"]
 
-        if Friendship.objects.filter(
-            from_user=request_user,
-            to_user=to_user,
-        ).exists():
-            raise serializers.ValidationError(
-                "Заявка этому пользователю уже существует."
-            )
+            direct = Friendship.objects.filter(
+                from_user=request_user,
+                to_user=to_user,
+            ).first()
 
-        return attrs
+            if direct:
+                if direct.status == "accepted":
+                    raise serializers.ValidationError(
+                        "Этот пользователь уже у вас в друзьях."
+                    )
+
+                if direct.status == "blocked":
+                    raise serializers.ValidationError(
+                        "Нельзя отправить заявку этому пользователю."
+                    )
+
+                raise serializers.ValidationError(
+                    "Заявка этому пользователю уже существует."
+                )
+
+            reverse = Friendship.objects.filter(
+                from_user=to_user,
+                to_user=request_user,
+            ).first()
+
+            if reverse:
+                if reverse.status == "accepted":
+                    raise serializers.ValidationError(
+                        "Этот пользователь уже у вас в друзьях."
+                    )
+
+                if reverse.status == "blocked":
+                    raise serializers.ValidationError(
+                        "Нельзя отправить заявку этому пользователю."
+                    )
+
+                # reverse pending специально разрешаем:
+                # FriendshipViewSet автоматически примет
+                # встречную заявку.
+                if reverse.status == "pending":
+                    return attrs
+
+            return attrs

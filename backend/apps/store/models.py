@@ -49,14 +49,25 @@ class PromoCode(models.Model):
 
     def is_valid(self):
         now = timezone.now()
+
         if not self.is_active:
             return False
+
+        if self.discount_percent > 100:
+            return False
+
         if self.valid_from and now < self.valid_from:
             return False
+
         if self.valid_until and now > self.valid_until:
             return False
-        if self.max_uses is not None and self.times_used >= self.max_uses:
+
+        if (
+            self.max_uses is not None
+            and self.times_used >= self.max_uses
+        ):
             return False
+
         return True
 
 

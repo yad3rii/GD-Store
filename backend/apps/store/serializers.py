@@ -1,8 +1,8 @@
 from rest_framework import serializers
-
+from django.db.models import Q
 from apps.catalog.serializers import GameListSerializer
 from apps.library.models import LibraryEntry
-
+from apps.accounts.models import Friendship
 from .models import CartItem, Order, OrderItem, PromoCode, Wishlist
 
 
@@ -79,17 +79,36 @@ class CheckoutSerializer(serializers.Serializer):
         return promo
 
     def validate_recipient_username(self, value):
-        if not value:
-            return value
-        User = self.context["request"].user.__class__
-        buyer = self.context["request"].user
-        try:
-            recipient = User.objects.get(username=value)
-        except User.DoesNotExist:
-            raise serializers.ValidationError("Пользователь-получатель не найден.")
-        if recipient == buyer:
-            raise serializers.ValidationError("Нельзя подарить самому себе — оформите обычную покупку.")
-        return recipient
+            if not value:
+                return value
+
+            buyer = self.context["request"].user
+            User = buyer.__class__
+
+            try:
+                recipient = User.objects.get(username=value)
+            except User.DoesNotExist as exc:
+                raise serializers.ValidationError(
+                    "Пользователь-получатель не найден."
+                ) from exc
+
+            if recipient == buyer:
+                raise serializers.ValidationError(
+                    "Нельзя подарить игру самому себе."
+                )
+
+            are_friends = Friendship.objects.filter(
+                Q(from_user=buyer, to_user=recipient)
+                | Q(from_user=recipient, to_user=buyer),
+                status="accepted",
+            ).exists()
+
+            if not are_friends:
+                raise serializers.ValidationError(
+                    "Подарить игру можно только другу."
+                )
+
+            return recipient
 
 
 class OrderItemSerializer(serializers.ModelSerializer):

@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
@@ -8,7 +9,13 @@ from rest_framework.response import Response
 
 from apps.library.models import LibraryEntry
 
-from .models import CartItem, Order, OrderItem, Wishlist
+from .models import (
+    CartItem,
+    Order,
+    OrderItem,
+    PromoCode,
+    Wishlist,
+)
 from .serializers import (
     CartItemCreateSerializer,
     CartItemSerializer,
@@ -19,80 +26,158 @@ from .serializers import (
 )
 from .throttles import CheckoutThrottle, OrderActionThrottle
 
+
 logger = logging.getLogger(__name__)
+
+MONEY_STEP = Decimal("0.01")
 
 
 class CartViewSet(viewsets.ModelViewSet):
-    """
-    GET    /api/v1/store/cart/            — список товаров в корзине
-    POST   /api/v1/store/cart/  {game}    — добавить игру
-    DELETE /api/v1/store/cart/<id>/       — убрать из корзины
-    POST   /api/v1/store/cart/checkout/   — оформить заказ (опционально: promo_code, recipient_username)
-    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return CartItem.objects.filter(user=self.request.user).select_related("game")
+        return (
+            CartItem.objects
+            .filter(user=self.request.user)
+            .select_related("game")
+        )
 
     def get_serializer_class(self):
         if self.action == "create":
             return CartItemCreateSerializer
+
         return CartItemSerializer
 
     def get_throttles(self):
         if self.action == "checkout":
             return [CheckoutThrottle()]
+
         return super().get_throttles()
 
     def create(self, request, *args, **kwargs):
+        del args, kwargs
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+
         try:
             instance = serializer.save()
         except IntegrityError:
-            return Response({"detail": "Игра уже в корзине."}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.to_representation(instance), status=status.HTTP_201_CREATED)
-
-    @action(detail=False, methods=["post"])
-    def checkout(self, request):
-        """
-        Создаёт Order из корзины. Реальная оплата — через apps.payments (webhook подтверждает).
-
-        Body (всё опционально):
-          {"promo_code": "SUMMER25", "recipient_username": "friend"}
-
-        Игры, которые получатель покупки уже успел приобрести где-то ещё, из корзины
-        тихо убираются и в заказ не попадают.
-        """
-        checkout_data = CheckoutSerializer(data=request.data, context={"request": request})
-        checkout_data.is_valid(raise_exception=True)
-        promo = checkout_data.validated_data.get("promo_code") or None
-        recipient = checkout_data.validated_data.get("recipient_username") or None
-        beneficiary = recipient or request.user
-
-        owned_game_ids = set(
-            LibraryEntry.objects.filter(user=beneficiary).values_list("game_id", flat=True)
-        )
-        items = list(self.get_queryset())
-        already_owned = [i for i in items if i.game_id in owned_game_ids]
-        purchasable = [i for i in items if i.game_id not in owned_game_ids]
-
-        if already_owned:
-            CartItem.objects.filter(id__in=[i.id for i in already_owned]).delete()
-
-        if not purchasable:
             return Response(
-                {"detail": "Корзина пуста (или все игры уже есть у получателя)."},
+                {"detail": "Игра уже в корзине."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        return Response(
+            serializer.to_representation(instance),
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=["post"])
+    def checkout(self, request):
+        checkout_data = CheckoutSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        checkout_data.is_valid(raise_exception=True)
+
+        promo = checkout_data.validated_data.get("promo_code") or None
+        recipient = (
+            checkout_data.validated_data.get("recipient_username")
+            or None
+        )
+
+        beneficiary = recipient or request.user
+
         with transaction.atomic():
-            subtotal = sum((i.game.final_price for i in purchasable), start=0)
-            discount_total = 0
-            if promo:
-                discount_total = round(subtotal * promo.discount_percent / 100, 2)
+            items = list(
+                CartItem.objects
+                .select_for_update()
+                .filter(user=request.user)
+                .select_related("game")
+            )
+
+            owned_game_ids = set(
+                LibraryEntry.objects
+                .filter(user=beneficiary)
+                .values_list("game_id", flat=True)
+            )
+
+            already_owned = [
+                item
+                for item in items
+                if item.game_id in owned_game_ids
+            ]
+
+            purchasable = [
+                item
+                for item in items
+                if item.game_id not in owned_game_ids
+            ]
+
+            if already_owned:
+                CartItem.objects.filter(
+                    id__in=[item.id for item in already_owned]
+                ).delete()
+
+            if not purchasable:
+                return Response(
+                    {
+                        "detail": (
+                            "Корзина пуста или все игры уже "
+                            "есть у получателя."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if promo is not None:
+                try:
+                    promo = (
+                        PromoCode.objects
+                        .select_for_update()
+                        .get(pk=promo.pk)
+                    )
+                except PromoCode.DoesNotExist:
+                    return Response(
+                        {"detail": "Промокод больше не существует."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if not promo.is_valid():
+                    return Response(
+                        {
+                            "detail": (
+                                "Промокод недействителен "
+                                "или уже исчерпан."
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            subtotal = sum(
+                (
+                    item.game.final_price
+                    for item in purchasable
+                ),
+                Decimal("0.00"),
+            ).quantize(MONEY_STEP)
+
+            discount_total = Decimal("0.00")
+
+            if promo is not None:
+                discount_total = (
+                    subtotal
+                    * Decimal(promo.discount_percent)
+                    / Decimal("100")
+                ).quantize(MONEY_STEP)
+
                 promo.times_used += 1
                 promo.save(update_fields=["times_used"])
+
+            total = (subtotal - discount_total).quantize(
+                MONEY_STEP
+            )
 
             order = Order.objects.create(
                 user=request.user,
@@ -100,112 +185,205 @@ class CartViewSet(viewsets.ModelViewSet):
                 promo_code=promo,
                 subtotal=subtotal,
                 discount_total=discount_total,
-                total=subtotal - discount_total,
+                total=total,
                 status=Order.STATUS_PENDING,
             )
-            OrderItem.objects.bulk_create([
-                OrderItem(order=order, game=i.game, price_at_purchase=i.game.final_price)
-                for i in purchasable
-            ])
-            CartItem.objects.filter(id__in=[i.id for i in purchasable]).delete()
+
+            OrderItem.objects.bulk_create(
+                [
+                    OrderItem(
+                        order=order,
+                        game=item.game,
+                        price_at_purchase=(
+                            item.game.final_price.quantize(
+                                MONEY_STEP
+                            )
+                        ),
+                    )
+                    for item in purchasable
+                ]
+            )
+
+            CartItem.objects.filter(
+                id__in=[item.id for item in purchasable]
+            ).delete()
 
         logger.info(
-            "Order %s created by user %s (total=%s, gift=%s, promo=%s)",
-            order.id, request.user.id, order.total, order.is_gift, promo.code if promo else None,
+            "Order %s created by user %s "
+            "(total=%s, gift=%s, promo=%s)",
+            order.id,
+            request.user.id,
+            order.total,
+            order.is_gift,
+            promo.code if promo else None,
         )
-        return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
+
+        return Response(
+            OrderSerializer(order).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class WishlistViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Wishlist.objects.filter(user=self.request.user).select_related("game")
+        return (
+            Wishlist.objects
+            .filter(user=self.request.user)
+            .select_related("game")
+        )
 
     def get_serializer_class(self):
         if self.action == "create":
             return WishlistCreateSerializer
+
         return WishlistSerializer
 
     def create(self, request, *args, **kwargs):
+        del args, kwargs
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+
         try:
             instance = serializer.save()
         except IntegrityError:
-            return Response({"detail": "Игра уже в вишлисте."}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.to_representation(instance), status=status.HTTP_201_CREATED)
+            return Response(
+                {"detail": "Игра уже в вишлисте."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            serializer.to_representation(instance),
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class OrderViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    GET  /api/v1/store/orders/               — история покупок пользователя
-    POST /api/v1/store/orders/<id>/cancel/   — отменить свой ещё не оплаченный заказ
-    POST /api/v1/store/orders/<id>/refund/   — запросить возврат за оплаченный заказ
-    """
     serializer_class = OrderSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Order.objects.filter(user=self.request.user).prefetch_related("items__game")
+        return (
+            Order.objects
+            .filter(user=self.request.user)
+            .select_related(
+                "recipient",
+                "promo_code",
+            )
+            .prefetch_related("items__game")
+        )
 
     def get_throttles(self):
         if self.action in ("cancel", "refund"):
             return [OrderActionThrottle()]
+
         return super().get_throttles()
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
-        order = self.get_object()
-        if order.status != Order.STATUS_PENDING:
-            return Response(
-                {"detail": "Отменить можно только заказ в статусе pending."},
-                status=status.HTTP_400_BAD_REQUEST,
+        del pk
+
+        with transaction.atomic():
+            order = (
+                Order.objects
+                .select_for_update()
+                .get(
+                    pk=self.get_object().pk,
+                    user=request.user,
+                )
             )
-        order.status = Order.STATUS_CANCELLED
-        order.save(update_fields=["status"])
-        logger.info("Order %s cancelled by user %s", order.id, request.user.id)
+
+            if order.status != Order.STATUS_PENDING:
+                return Response(
+                    {
+                        "detail": (
+                            "Отменить можно только заказ "
+                            "в статусе pending."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            order.status = Order.STATUS_CANCELLED
+            order.save(update_fields=["status"])
+
+        logger.info(
+            "Order %s cancelled by user %s",
+            order.id,
+            request.user.id,
+        )
+
         return Response(OrderSerializer(order).data)
 
     @action(detail=True, methods=["post"])
     def refund(self, request, pk=None):
-        # Локальный импорт — apps.payments уже импортирует apps.store.models на уровне модуля,
-        # так что импорт apps.payments здесь делаем только внутри функции, чтобы не словить
-        # циклический импорт при старте Django.
+        del pk
+
         from apps.payments.models import Payment
 
-        order = self.get_object()
-        if order.status != Order.STATUS_PAID:
-            return Response(
-                {"detail": "Возврат возможен только для оплаченного заказа."},
-                status=status.HTTP_400_BAD_REQUEST,
+        with transaction.atomic():
+            order = (
+                Order.objects
+                .select_for_update()
+                .prefetch_related("items__game")
+                .get(
+                    pk=self.get_object().pk,
+                    user=request.user,
+                )
             )
 
-        with transaction.atomic():
-            order = Order.objects.select_for_update().get(pk=order.pk)
             if order.status != Order.STATUS_PAID:
                 return Response(
-                    {"detail": "Возврат возможен только для оплаченного заказа."},
+                    {
+                        "detail": (
+                            "Возврат возможен только "
+                            "для оплаченного заказа."
+                        )
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             beneficiary = order.beneficiary
-            for item in order.items.select_related("game"):
-                # Не отбираем игру, если она есть у получателя ещё по какому-то другому оплаченному заказу
-                # (например, купил сам, а потом ему ещё и подарили ту же игру).
+
+            for item in order.items.all():
                 still_owned_elsewhere = (
-                    Order.objects.filter(status=Order.STATUS_PAID, items__game=item.game)
-                    .filter(Q(user=beneficiary) | Q(recipient=beneficiary))
+                    Order.objects
+                    .filter(
+                        status=Order.STATUS_PAID,
+                        items__game=item.game,
+                    )
+                    .filter(
+                        Q(recipient=beneficiary)
+                        | Q(
+                            user=beneficiary,
+                            recipient__isnull=True,
+                        )
+                    )
                     .exclude(pk=order.pk)
                     .exists()
                 )
+
                 if not still_owned_elsewhere:
-                    LibraryEntry.objects.filter(user=beneficiary, game=item.game).delete()
+                    LibraryEntry.objects.filter(
+                        user=beneficiary,
+                        game=item.game,
+                    ).delete()
 
             order.status = Order.STATUS_REFUNDED
             order.save(update_fields=["status"])
 
-            Payment.objects.filter(order=order).update(status=Payment.STATUS_REFUNDED)
+            Payment.objects.filter(
+                order=order
+            ).update(
+                status=Payment.STATUS_REFUNDED
+            )
 
-        logger.info("Order %s refunded (requested by user %s)", order.id, request.user.id)
+        logger.info(
+            "Order %s refunded by user %s",
+            order.id,
+            request.user.id,
+        )
+
         return Response(OrderSerializer(order).data)
