@@ -9,4 +9,3 @@ class PaymentAdmin(admin.ModelAdmin):
     list_filter = ["provider", "status"]
     search_fields = ["id", "provider_payment_id", "order__id"]
     readonly_fields = ["raw_payload", "created_at", "updated_at"]
-
