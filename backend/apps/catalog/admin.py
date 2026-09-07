@@ -1,11 +1,14 @@
 from django.contrib import admin
-from .models import Game, Genre, Tag, Developer, Publisher, Screenshot, SystemRequirement
 
-admin.site.register(Genre)
-admin.site.register(Tag)
-admin.site.register(Developer)
-admin.site.register(Publisher)
-admin.site.register(SystemRequirement)
+from .models import (
+    Developer,
+    Game,
+    Genre,
+    Publisher,
+    Screenshot,
+    SystemRequirement,
+    Tag,
+)
 
 
 class ScreenshotInline(admin.TabularInline):
@@ -13,10 +16,86 @@ class ScreenshotInline(admin.TabularInline):
     extra = 1
 
 
+class SystemRequirementInline(admin.StackedInline):
+    model = SystemRequirement
+    extra = 0
+
+
+@admin.register(Genre)
+class GenreAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug"]
+    search_fields = ["name"]
+    prepopulated_fields = {"slug": ("name",)}
+
+
+@admin.register(Tag)
+class TagAdmin(admin.ModelAdmin):
+    list_display = ["name"]
+    search_fields = ["name"]
+
+
+@admin.register(Developer)
+class DeveloperAdmin(admin.ModelAdmin):
+    list_display = ["name"]
+    search_fields = ["name"]
+
+
+@admin.register(Publisher)
+class PublisherAdmin(admin.ModelAdmin):
+    list_display = ["name"]
+    search_fields = ["name"]
+
+
+@admin.register(SystemRequirement)
+class SystemRequirementAdmin(admin.ModelAdmin):
+    list_display = [
+        "game",
+        "os",
+        "cpu",
+        "ram",
+        "gpu",
+        "storage",
+    ]
+    search_fields = [
+        "game__title",
+        "os",
+        "cpu",
+        "gpu",
+    ]
+    autocomplete_fields = ["game"]
+
+
 @admin.register(Game)
 class GameAdmin(admin.ModelAdmin):
-    list_display = ["title", "price", "discount_percent", "is_published", "release_date"]
-    list_filter = ["is_published", "genres"]
-    search_fields = ["title"]
-    prepopulated_fields = {"slug": ("title",)}
-    inlines = [ScreenshotInline]
+    list_display = [
+        "title",
+        "price",
+        "discount_percent",
+        "final_price_display",
+        "is_published",
+        "release_date",
+    ]
+
+    list_filter = [
+        "is_published",
+        "genres",
+        "tags",
+    ]
+
+    search_fields = [
+        "title",
+        "description",
+    ]
+
+    prepopulated_fields = {
+        "slug": ("title",)
+    }
+
+    inlines = [
+        ScreenshotInline,
+        SystemRequirementInline,
+    ]
+
+    @admin.display(description="Цена со скидкой")
+    def final_price_display(self, obj):
+        return obj.final_price
