@@ -1,3 +1,5 @@
+import { canSee } from "../demo/extras.mjs";
+import { ReportButton } from "./Reports";
 import { useState, useEffect, useRef } from "react";
 import {
   Link,
@@ -52,7 +54,11 @@ export function Friends() {
         eyebrow="ВМЕСТЕ ЛУЧШЕ"
         title="Ваша команда"
         text="Друзья, новые знакомства и разговоры между играми."
-      />
+      >
+        <Link className="btn" to="/events">
+          Запланировать игровой вечер ↗
+        </Link>
+      </Head>
       <div className="social-layout">
         <aside className="contact-panel">
           <div className="contact-search">
@@ -230,6 +236,7 @@ export function Friends() {
                         key={m.id}
                       >
                         <p>{m.text}</p>
+                        <ReportButton user={m.from} message={m.id} compact />
                         <small>
                           {date(m.at)} ·{" "}
                           {new Date(m.at).toLocaleTimeString("ru-RU", {
@@ -327,9 +334,10 @@ export function Community() {
     [reply, setReply] = useState(""),
     [editing, setEditing] = useState(false);
   const nav = useNavigate();
-  const topic = state.topics.find((t) => t.id === id);
+  const topic = state.topics.find((t) => t.id === id && canSee(t, me));
   const found = state.topics.filter(
     (t) =>
+      canSee(t, me) &&
       (!game || t.game === game) &&
       (t.title + " " + t.body).toLowerCase().includes(search.toLowerCase()),
   );
@@ -354,6 +362,13 @@ export function Community() {
             ← Все обсуждения
           </Link>
           <article className="panel topic-detail">
+            {(topic.hidden || topic.locked) && (
+              <p className="moderation-label">
+                {topic.hidden
+                  ? "Скрыто модератором"
+                  : "Ответы закрыты модератором"}
+              </p>
+            )}
             <p className="eyebrow">
               {games.find((g) => g.id === topic.game)?.title}
             </p>
@@ -417,7 +432,12 @@ export function Community() {
                   onChange={(e) => setReply(e.target.value)}
                 />
               </label>
-              <button className="btn primary">Отправить ответ</button>
+              <button
+                className="btn primary"
+                disabled={topic.locked || topic.hidden}
+              >
+                Отправить ответ
+              </button>
             </form>
           </Gate>
         </>
@@ -563,10 +583,11 @@ export function Workshop() {
     [search, setSearch] = useState(""),
     [create, setCreate] = useState(false),
     [editing, setEditing] = useState(false);
-  const item = state.mods.find((m) => m.id === id);
+  const item = state.mods.find((m) => m.id === id && canSee(m, me));
   const subscribed = state.subscriptions[me?.id] || [];
   const found = state.mods.filter(
     (m) =>
+      canSee(m, me) &&
       (!game || m.game === game) &&
       m.title.toLowerCase().includes(search.toLowerCase()) &&
       (category === "Все работы" ||
@@ -596,6 +617,9 @@ export function Workshop() {
           <Link className="back-link" to="/workshop">
             ← Все работы
           </Link>
+          {item.hidden && (
+            <p className="moderation-label">Работа скрыта модератором</p>
+          )}
           <div className="detail-layout">
             <div>
               <div className="work-detail-art">

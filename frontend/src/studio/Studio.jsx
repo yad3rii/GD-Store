@@ -1,9 +1,20 @@
+import {
+  navigationGroups,
+  matchesPath,
+  SectionNavigation,
+  ProfileMenu,
+} from "./Navigation";
+import { SaleWatcher } from "./ServiceFeatures";
+import { cosmetics } from "../demo/community.mjs";
+import { GiftArrival } from "./Gifts";
+import { DiscoveryStrip } from "./Discovery";
 import { useState } from "react";
 import {
   Link,
   NavLink,
   Outlet,
   useNavigate,
+  useLocation,
   useSearchParams,
 } from "react-router-dom";
 import { useDemo } from "../demo/context";
@@ -12,13 +23,21 @@ import Icon from "../components/Icon";
 export const money = (n) =>
   n === 0 ? "Бесплатно" : new Intl.NumberFormat("ru-RU").format(n) + " ₴";
 export function Avatar({ user, large = false }) {
+  const avatar =
+    cosmetics.find((x) => x.id === user?.cosmeticAvatar)?.image || user?.avatar;
+  const frame = cosmetics.find((x) => x.id === user?.cosmeticFrame)?.color;
   return (
     <span
       className={"avatar " + (large ? "large" : "")}
-      style={{ "--avatar": user?.color || "#78a9a3" }}
+      style={{
+        "--avatar": user?.color || "#78a9a3",
+        boxShadow: frame
+          ? `0 0 0 3px ${frame}, 0 0 22px ${frame}55`
+          : undefined,
+      }}
     >
-      {user?.avatar ? (
-        <img src={user.avatar} alt="" />
+      {avatar ? (
+        <img src={avatar} alt="" />
       ) : (
         user?.initials || user?.name?.slice(0, 2) || "?"
       )}
@@ -52,6 +71,15 @@ export function Empty({
 }
 export function Gate({ children }) {
   const { me } = useDemo();
+  if (me?.banned)
+    return (
+      <Empty
+        title="Профиль заблокирован"
+        text={me.banReason}
+        link="/settings"
+        label="Переключить демопрофиль"
+      />
+    );
   return me ? (
     children
   ) : (
@@ -79,6 +107,10 @@ export function Shell() {
   const { state, me, act } = useDemo();
   const [search, setSearch] = useState("");
   const nav = useNavigate();
+  const { pathname } = useLocation();
+  const group = navigationGroups.find((g) =>
+    g.paths.some((p) => matchesPath(pathname, p)),
+  );
   const friends = state.friends.filter(
     (f) => f.status === "accepted" && [f.from, f.to].includes(me?.id),
   );
@@ -97,22 +129,18 @@ export function Shell() {
         <Link className="logo" to="/">
           <span className="logo-icon">G↗</span>GD<span>STORE</span>
         </Link>
-        <p className="nav-label">ВАШЕ ПРОСТРАНСТВО</p>
-        <nav>
-          {[
-            ["/", "grid", "Магазин"],
-            ["/library", "library", "Библиотека"],
-            ["/wishlist", "heart", "Желаемое"],
-            ["/community", "globe", "Сообщество"],
-            ["/workshop", "tools", "Мастерская"],
-          ].map(([to, icon, label]) => (
-            <NavLink key={to} to={to} end={to === "/"} title={label}>
-              <Icon name={icon} />
-              {label}
-              {to === "/wishlist" && (
-                <small>{state.wishlist[me?.id]?.length || 0}</small>
-              )}
-            </NavLink>
+        <p className="nav-label">ПРОСТРАНСТВО</p>
+        <nav className="primary-navigation" aria-label="Основная навигация">
+          {navigationGroups.map((g) => (
+            <Link
+              key={g.to}
+              to={g.to}
+              className={group === g ? "active" : ""}
+              aria-current={group === g ? "true" : undefined}
+            >
+              <Icon name={g.icon} />
+              <span>{g.label}</span>
+            </Link>
           ))}
         </nav>
         <div className="sidebar-line" />
@@ -151,18 +179,20 @@ export function Shell() {
           )}
         </div>
         <div className="sidebar-bottom">
-          <NavLink to="/settings" title="Настройки">
-            <Icon name="settings" />
-            Настройки
+          <NavLink to="/support" title="Поддержка">
+            <Icon name="shield" />
+            <span>Поддержка</span>
           </NavLink>
-          <Link to="/profile" className="self">
-            <Avatar user={me} />
-            <span>
-              {me?.name || "Гость"}
-              <small>{me ? "Локальный профиль" : "Выбрать профиль"}</small>
-            </span>
-            <Icon name="chevron" size={16} />
-          </Link>
+          {me?.role === "admin" && !me.banned && (
+            <NavLink
+              className="admin-link"
+              title="Администрирование"
+              to="/admin"
+            >
+              <Icon name="shield" />
+              <span>Управление сайтом</span>
+            </NavLink>
+          )}
         </div>
       </aside>
       <div className="workspace">
@@ -193,13 +223,41 @@ export function Shell() {
               (f) => f.to === me?.id && f.status === "pending",
             ) && <i className="notification-dot" />}
           </Link>
+          <Link
+            className="icon-btn notification-nav"
+            to="/notifications"
+            aria-label="Уведомления"
+          >
+            <Icon name="bell" />
+            {state.notifications.some((n) => n.to === me?.id && !n.read) && (
+              <b>
+                {Math.min(
+                  99,
+                  state.notifications.filter((n) => n.to === me?.id && !n.read)
+                    .length,
+                )}
+              </b>
+            )}
+          </Link>
           <Link className="icon-btn" to="/cart" aria-label="Корзина">
             <Icon name="cart" />
             {!!state.cart[me?.id]?.length && <b>{state.cart[me.id].length}</b>}
           </Link>
-          <Link to={me ? "/profile" : "/login"} aria-label="Мой профиль">
-            <Avatar user={me} />
-          </Link>
+          {me && (
+            <div className="header-balances">
+              <Link to="/wallet" title="Демокошелёк">
+                <span>Кошелёк ＋</span>
+                <strong>
+                  {new Intl.NumberFormat("ru-RU").format(me.wallet || 0)} ₴
+                </strong>
+              </Link>
+              <Link to="/points-history" title="История демобаллов">
+                <span>Демобаллы</span>
+                <strong>✦ {me.points || 0}</strong>
+              </Link>
+            </div>
+          )}
+          <ProfileMenu me={me} />
         </header>
         <div className="demo-bar">
           <span>
@@ -207,8 +265,23 @@ export function Shell() {
           </span>
           <Link to="/settings">Сменить профиль ↗</Link>
         </div>
+        {state.announcement.enabled && (
+          <div className="site-announcement live-announcement">
+            <Icon name="spark" />
+            <span>{state.announcement.text}</span>
+          </div>
+        )}
+        {me?.banned && (
+          <div className="ban-banner" role="status">
+            Профиль заблокирован: {me.banReason}. Публикации, сообщения и
+            покупки недоступны.
+          </div>
+        )}
+        <SectionNavigation group={group} path={pathname} />
         <main id="main">
           <Outlet />
+          <SaleWatcher />
+          <GiftArrival />
         </main>
         <footer>
           <span>GD STORE / PLAY YOUR WAY</span>
@@ -252,6 +325,17 @@ export function GameCard({ game }) {
         }
       >
         <Icon name="heart" size={18} />
+      </button>
+      <button
+        className={
+          "compare-toggle " +
+          (state.comparison[me?.id]?.includes(game.id) ? "selected" : "")
+        }
+        aria-label={"Сравнить " + game.title}
+        aria-pressed={!!state.comparison[me?.id]?.includes(game.id)}
+        onClick={() => act({ type: "compare", game: game.id })}
+      >
+        <Icon name="compare" size={17} />
       </button>
       <div className="card-info">
         <p className="micro">
@@ -364,6 +448,7 @@ export function Store() {
           </div>
         </div>
       )}
+      <DiscoveryStrip />
       <section className="catalog-section">
         <div className="section-title">
           <div>

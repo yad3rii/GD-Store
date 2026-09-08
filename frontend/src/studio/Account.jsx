@@ -1,101 +1,12 @@
+import { NotificationSettings } from "./TeamChat";
+import { Privacy, SaleDemo } from "./ServiceFeatures";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useDemo } from "../demo/context";
 import { games } from "../demo/model.mjs";
 import { Head, Avatar, Gate, Empty, money } from "./Studio";
 import { Modal, date } from "./Personal";
-export function Account({ register = false }) {
-  const { state, act } = useDemo();
-  const [name, setName] = useState(""),
-    [handle, setHandle] = useState("");
-  const nav = useNavigate();
-  return (
-    <div className="account-layout">
-      <div className="account-intro">
-        <p className="eyebrow">YOUR PLAYER IDENTITY</p>
-        <h1>
-          Все твои миры.
-          <br />
-          Один профиль.
-        </h1>
-        <p>Библиотека, друзья и любимые сообщества — в одном пространстве.</p>
-        <div className="account-emblem">G↗</div>
-      </div>
-      <section className="panel account-form">
-        <h2>{register ? "Создать локальный профиль" : "С возвращением"}</h2>
-        <p className="muted space">
-          Демонстрация без сервера: пароли и настоящая авторизация не
-          используются.
-        </p>
-        {register ? (
-          <form
-            className="form-stack space"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (act({ type: "register", name, handle }, "Профиль создан"))
-                nav("/profile");
-            }}
-          >
-            <label>
-              Имя игрока
-              <input
-                required
-                maxLength={40}
-                autoComplete="nickname"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </label>
-            <label>
-              Логин
-              <input
-                required
-                pattern="[A-Za-z0-9_]{3,20}"
-                title="3–20 латинских букв, цифр или _"
-                value={handle}
-                onChange={(e) => setHandle(e.target.value)}
-                maxLength={20}
-              />
-            </label>
-            <button className="btn primary">Создать профиль</button>
-            <Link className="accent" to="/login">
-              Уже есть локальный профиль?
-            </Link>
-          </form>
-        ) : (
-          <>
-            <div className="account-choices">
-              {state.users.map((u) => (
-                <button
-                  key={u.id}
-                  onClick={() => {
-                    if (
-                      act(
-                        { type: "switch", user: u.id },
-                        "Вы вошли как " + u.name,
-                      )
-                    )
-                      nav("/profile");
-                  }}
-                >
-                  <Avatar user={u} />
-                  <span>
-                    {u.name}
-                    <small>@{u.handle}</small>
-                  </span>
-                  <span>→</span>
-                </button>
-              ))}
-            </div>
-            <Link className="btn primary" to="/register">
-              Создать свой профиль
-            </Link>
-          </>
-        )}
-      </section>
-    </div>
-  );
-}
+export { default as Account } from "./AuthScreen";
 export function Settings() {
   const { state, me, act, reset } = useDemo();
   const [confirm, setConfirm] = useState(false);
@@ -116,27 +27,32 @@ export function Settings() {
             сообщение. Выбранный профиль общий для вкладок этого сайта.
           </p>
           <div className="account-choices">
-            {state.users.map((u) => (
-              <button
-                key={u.id}
-                onClick={() =>
-                  act(
-                    { type: "switch", user: u.id },
-                    "Выбран профиль " + u.name,
-                  )
-                }
-              >
-                <Avatar user={u} />
-                <span>
-                  {u.name}
-                  <small>@{u.handle}</small>
-                </span>
-                <span className="accent">{u.id === me?.id ? "✓" : "→"}</span>
-              </button>
-            ))}
+            {state.users
+              .filter((u) => !u.auth)
+              .map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() =>
+                    act(
+                      { type: "switch", user: u.id },
+                      "Выбран профиль " + u.name,
+                    )
+                  }
+                >
+                  <Avatar user={u} />
+                  <span>
+                    {u.name}
+                    <small>@{u.handle}</small>
+                  </span>
+                  <span className="accent">{u.id === me?.id ? "✓" : "→"}</span>
+                </button>
+              ))}
           </div>
           <Link className="btn" to="/register">
             ＋ Новый профиль
+          </Link>
+          <Link className="btn space" to="/login">
+            Войти с паролем
           </Link>
         </section>
         <div>
@@ -182,6 +98,9 @@ export function Settings() {
               </Link>
             </Gate>
           </section>
+          <Privacy />
+          <NotificationSettings />
+          <SaleDemo />
           <section className="panel space">
             <h2>Данные демонстрации</h2>
             <p className="muted space">
@@ -243,8 +162,22 @@ export function Orders() {
               <p className="eyebrow">ДЕМОЗАКАЗ / {o.id.slice(0, 8)}</p>
               <h3>{date(o.at)}</h3>
             </div>
-            <span className="pill accent">В библиотеке</span>
+            <span className="pill accent">
+              {o.recipient && o.recipient !== o.user
+                ? "Подарок отправлен"
+                : "В библиотеке"}
+            </span>
           </div>
+          {o.recipient && o.recipient !== o.user && (
+            <p className="muted">
+              Для {state.users.find((u) => u.id === o.recipient)?.name}
+            </p>
+          )}
+          {o.promo && (
+            <p className="fine">
+              Промокод {o.promo} · скидка {o.discount} ₴
+            </p>
+          )}
           {o.games.map((id) => (
             <Link className="order-game" to={"/game/" + id} key={id}>
               {games.find((g) => g.id === id)?.title}
@@ -254,6 +187,7 @@ export function Orders() {
           <div className="order-total">
             <span>Демонстрационная сумма</span>
             <strong>{money(o.total)}</strong>
+            <small className="accent">＋{o.pointsEarned || 0} демобаллов</small>
           </div>
         </section>
       ))}

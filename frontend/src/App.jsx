@@ -1,3 +1,15 @@
+import Wallet from "./studio/Wallet";
+import Support from "./studio/Support";
+import { PointsHistory } from "./studio/ServiceFeatures";
+import Teammates from "./studio/Teammates";
+import CosmeticsShop from "./studio/CosmeticsShop";
+import Gifts from "./studio/Gifts";
+import Events from "./studio/Events";
+import Notifications from "./studio/Notifications";
+import Collections from "./studio/Collections";
+import Admin from "./studio/Admin";
+import Checkout from "./studio/Checkout";
+import { Compare, Discover } from "./studio/Discovery";
 import { Routes, Route } from "react-router-dom";
 import { DemoProvider } from "./demo/context";
 import { Shell, Store, NotFound } from "./studio/Studio";
@@ -29,9 +41,31 @@ export default function App() {
           <Route path="workshop" element={<Workshop />} />
           <Route path="workshop/:id" element={<Workshop />} />
           <Route path="settings" element={<Settings />} />
-          <Route path="login" element={<Account />} />
-          <Route path="register" element={<Account register />} />
+          <Route path="login" element={<Account key="login" />} />
+          <Route
+            path="register"
+            element={<Account key="register" register />}
+          />
+          <Route
+            path="forgot-password"
+            element={<Account key="reset" reset />}
+          />
+          <Route path="points-shop" element={<CosmeticsShop />} />
+          <Route path="wallet" element={<Wallet />} />
+          <Route path="support" element={<Support />} />
+          <Route path="points-history" element={<PointsHistory />} />
+          <Route path="teammates" element={<Teammates />} />
+          <Route path="gifts" element={<Gifts />} />
           <Route path="orders" element={<Orders />} />
+          <Route path="events" element={<Events />} />
+          <Route path="events/:id" element={<Events />} />
+          <Route path="notifications" element={<Notifications />} />
+          <Route path="collections" element={<Collections />} />
+          <Route path="collections/:id" element={<Collections />} />
+          <Route path="admin" element={<Admin />} />
+          <Route path="checkout" element={<Checkout />} />
+          <Route path="compare" element={<Compare />} />
+          <Route path="discover" element={<Discover />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

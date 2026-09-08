@@ -1,3 +1,8 @@
+import { serviceAction, visibleSection } from "./service.mjs";
+import { playerAction, purchasePoints } from "./players.mjs";
+import { communityAction } from "./community.mjs";
+import { socialAction, activityNotice } from "./social.mjs";
+import { upgrade, extraAction, checkoutQuote } from "./extras.mjs";
 export const STORAGE_KEY = "gd-store-studio-v1";
 export const people = [
   {
@@ -169,9 +174,26 @@ export const games = [
 export const price = (g) => Math.round(g.price * (1 - g.discount / 100));
 export function seed() {
   return {
-    version: 1,
+    version: 4,
+    tickets: [],
+    saleWatch: {},
+    parties: [],
+    gifts: [],
+    reports: [],
+    cosmeticsOwned: {},
+    events: [],
+    notifications: [],
+    collections: [],
     active: "karim",
-    users: people,
+    users: people.map((u) => ({
+      ...u,
+      role: u.id === "karim" ? "admin" : "player",
+      banned: false,
+      points: 1000,
+    })),
+    comparison: {},
+    adminLog: [],
+    announcement: { enabled: false, text: "" },
     library: { karim: ["orbital", "ashen", "velocity"] },
     wishlist: { karim: ["echoes"] },
     cart: {},
@@ -266,18 +288,24 @@ export function seed() {
 export function load(storage) {
   try {
     const x = JSON.parse(storage.getItem(STORAGE_KEY));
-    return x?.version === 1 && Array.isArray(x.users) ? x : seed();
+    return [1, 2, 3, 4].includes(x?.version) && Array.isArray(x.users)
+      ? upgrade(x)
+      : upgrade(seed());
   } catch {
-    return seed();
+    return upgrade(seed());
   }
 }
 export function transition(s, a) {
-  const n = structuredClone(s),
+  const n = upgrade(structuredClone(s)),
     me = n.active,
     id = a.id || globalThis.crypto.randomUUID(),
     at = new Date().toISOString();
   const need = () => {
     if (!me) throw Error("Выберите профиль, чтобы продолжить.");
+    if (n.users.find((u) => u.id === me)?.banned)
+      throw Error(
+        "Профиль заблокирован: " + n.users.find((u) => u.id === me).banReason,
+      );
   };
   const list = (field) => n[field][me] || (n[field][me] = []);
   const friend = (user) =>
@@ -285,8 +313,35 @@ export function transition(s, a) {
       (f) => [f.from, f.to].includes(me) && [f.from, f.to].includes(user),
     );
   const note = (text) => n.activity.unshift({ id, author: me, text, at });
+  if (serviceAction(n, a, games, id, at)) return n;
+  if (playerAction(n, a, games, id, at)) return n;
+  if (communityAction(n, a, id, at)) return n;
+  if (extraAction(n, a, games, id, at)) return n;
+  if (socialAction(n, a, games, id, at)) return n;
   switch (a.type) {
+    case "wallet-topup": {
+      need();
+      const user = n.users.find((u) => u.id === me);
+      if (
+        !Number.isSafeInteger(a.amount) ||
+        a.amount < 1 ||
+        a.amount > 10000 ||
+        user.wallet + a.amount > 1000000
+      )
+        throw Error("Сумма: 1–10 000 ₴, максимум баланса 1 000 000 ₴.");
+      user.wallet += a.amount;
+      n.walletLog.unshift({
+        id,
+        user: me,
+        amount: a.amount,
+        text: "Демопополнение",
+        at,
+      });
+      break;
+    }
     case "switch":
+      if (n.users.find((u) => u.id === a.user)?.auth)
+        throw Error("Войдите в этот профиль с паролем.");
       if (a.user !== null && !n.users.some((u) => u.id === a.user))
         throw Error("Профиль не найден.");
       n.active = a.user;
@@ -308,12 +363,24 @@ export function transition(s, a) {
         bio: "",
         country: "",
         level: 1,
+        points: 1000,
+      });
+      n.pointsLog.unshift({
+        id: "welcome-" + id,
+        user: id,
+        amount: 1000,
+        text: "Стартовые демобаллы",
+        at,
       });
       n.active = id;
       break;
     }
     case "profile":
       need();
+      if (a.avatar !== n.users.find((u) => u.id === me).avatar)
+        n.users.find((u) => u.id === me).cosmeticAvatar = "";
+      if (a.cover !== n.users.find((u) => u.id === me).cover)
+        n.users.find((u) => u.id === me).cosmeticBanner = "";
       Object.assign(
         n.users.find((u) => u.id === me),
         {
@@ -341,31 +408,87 @@ export function transition(s, a) {
       n[a.type][me] = x.includes(a.game)
         ? x.filter((g) => g !== a.game)
         : [...x, a.game];
+      if (a.type === "wishlist") {
+        n.saleWatch[me] ||= {};
+        if (n.wishlist[me].includes(a.game))
+          n.saleWatch[me][a.game] = price(games.find((g) => g.id === a.game));
+        else delete n.saleWatch[me][a.game];
+      }
       break;
     }
     case "checkout": {
       need();
-      const items = list("cart");
-      if (!items.length) throw Error("Корзина пуста.");
+      const q = checkoutQuote(n, a, games);
+      if (a.method && !["card", "instant", "wallet"].includes(a.method))
+        throw Error("Выберите способ демооплаты.");
+      if (a.method === "wallet") {
+        const user = n.users.find((u) => u.id === me);
+        if (user.wallet < q.total)
+          throw Error("Недостаточно средств в демокошельке.");
+        user.wallet -= q.total;
+        if (q.total)
+          n.walletLog.unshift({
+            id,
+            user: me,
+            amount: -q.total,
+            text: "Покупка игр · " + id.slice(0, 8),
+            at,
+          });
+      }
+      const pointsEarned = purchasePoints(q.total);
+      n.users.find((u) => u.id === me).points += pointsEarned;
+      if (pointsEarned)
+        n.pointsLog.unshift({
+          id,
+          user: me,
+          amount: pointsEarned,
+          text: "Награда за заказ",
+          at,
+        });
       n.orders.unshift({
+        pointsEarned,
         id,
         user: me,
-        games: [...items],
-        total: items.reduce(
-          (v, i) => v + price(games.find((g) => g.id === i)),
-          0,
-        ),
+        games: q.items.map((g) => g.id),
+        subtotal: q.subtotal,
+        discount: q.discount,
+        total: q.total,
+        promo: q.promo,
+        recipient: q.recipient,
+        method: a.method || "instant",
+        status: "demo-completed",
         at,
       });
-      n.library[me] = [...new Set([...list("library"), ...items])];
+      n.library[q.recipient] = [
+        ...new Set([
+          ...(n.library[q.recipient] || []),
+          ...q.items.map((g) => g.id),
+        ]),
+      ];
+      if (q.recipient !== me)
+        n.gifts.unshift({
+          id,
+          from: me,
+          to: q.recipient,
+          gameIds: q.items.map((g) => g.id),
+          message: (a.giftMessage || "").trim().slice(0, 300),
+          at,
+          opened: false,
+        });
       n.cart[me] = [];
-      note("пополнил библиотеку");
+      note(
+        q.recipient === me ? "пополнил библиотеку" : "отправил подарок другу",
+      );
       break;
     }
     case "request":
       need();
+      if (!visibleSection(n, a.user, me, "requestsPrivacy"))
+        throw Error("Игрок ограничил заявки в друзья.");
       if (a.user === me || !n.users.some((u) => u.id === a.user))
         throw Error("Выберите другого игрока.");
+      if (n.users.find((u) => u.id === a.user)?.banned)
+        throw Error("Пользователь заблокирован.");
       if (friend(a.user)) throw Error("Заявка или дружба уже существует.");
       n.friends.push({ id, from: me, to: a.user, status: "pending" });
       break;
@@ -375,6 +498,8 @@ export function transition(s, a) {
         (f) => f.id === a.friend && f.to === me && f.status === "pending",
       );
       if (!f) throw Error("Заявка недоступна.");
+      if (n.users.some((u) => [f.from, f.to].includes(u.id) && u.banned))
+        throw Error("Пользователь заблокирован.");
       f.status = "accepted";
       break;
     }
@@ -399,6 +524,8 @@ export function transition(s, a) {
     }
     case "message":
       need();
+      if (n.users.find((u) => u.id === a.user)?.banned)
+        throw Error("Пользователь заблокирован.");
       if (friend(a.user)?.status !== "accepted")
         throw Error("Переписка доступна только друзьям.");
       if (!a.text.trim() || a.text.length > 2000)
@@ -424,13 +551,14 @@ export function transition(s, a) {
       need();
       const t = n.topics.find((t) => t.id === a.topic);
       if (!t || !a.text.trim()) throw Error("Введите ответ.");
+      if (t.hidden || t.locked) throw Error("Обсуждение закрыто модератором.");
       t.replies.push({ id, author: me, text: a.text.slice(0, 2000), at });
       break;
     }
     case "edit-topic": {
       need();
       const t = n.topics.find((t) => t.id === a.topic && t.author === me);
-      if (!t || !a.title.trim() || !a.body.trim())
+      if (!t || t.hidden || t.locked || !a.title.trim() || !a.body.trim())
         throw Error("Тема недоступна или не заполнена.");
       Object.assign(t, {
         title: a.title.trim().slice(0, 120),
@@ -442,7 +570,7 @@ export function transition(s, a) {
     case "edit-mod": {
       need();
       const m = n.mods.find((m) => m.id === a.mod && m.author === me);
-      if (!m || !a.title.trim() || !a.description.trim())
+      if (!m || m.hidden || !a.title.trim() || !a.description.trim())
         throw Error("Работа недоступна или не заполнена.");
       Object.assign(m, {
         title: a.title.slice(0, 100),
@@ -487,6 +615,11 @@ export function transition(s, a) {
     case "subscribe": {
       need();
       const x = list("subscriptions");
+      if (
+        !n.mods.some((m) => m.id === a.mod) ||
+        (!x.includes(a.mod) && n.mods.find((m) => m.id === a.mod).hidden)
+      )
+        throw Error("Работа недоступна.");
       n.subscriptions[me] = x.includes(a.mod)
         ? x.filter((i) => i !== a.mod)
         : [...x, a.mod];
@@ -516,5 +649,6 @@ export function transition(s, a) {
     default:
       throw Error("Неизвестное действие.");
   }
+  activityNotice(n, a, me, at);
   return n;
 }

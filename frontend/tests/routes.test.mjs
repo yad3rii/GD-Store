@@ -12,6 +12,31 @@ test("all main routes render without a server or API calls", async () => {
     optimizeDeps: { noDiscovery: true, include: [] },
   });
   const state = seed();
+  state.events = [
+    {
+      id: "evening",
+      host: "karim",
+      invitees: ["nova"],
+      rsvp: { nova: "invited" },
+      title: "Вечер игр",
+      game: "orbital",
+      description: "План",
+      startsAt: new Date(Date.now() + 86400000).toISOString(),
+      cancelled: false,
+    },
+  ];
+  state.collections = [
+    {
+      id: "favorites",
+      owner: "karim",
+      name: "Любимые",
+      color: "teal",
+      gameIds: ["orbital"],
+    },
+  ];
+
+  state.cart.karim = ["echoes"];
+  state.comparison.karim = ["orbital", "ashen"];
   const originalError = console.error;
   console.error = (message, ...args) => {
     if (
@@ -41,7 +66,23 @@ test("all main routes render without a server or API calls", async () => {
       "/settings",
       "/login",
       "/register",
+      "/forgot-password",
+      "/gifts",
+      "/points-shop",
+      "/teammates",
+      "/support",
+      "/wallet",
+      "/points-history",
       "/orders",
+      "/admin",
+      "/checkout",
+      "/compare",
+      "/discover",
+      "/events",
+      "/events/evening",
+      "/collections",
+      "/collections/favorites",
+      "/notifications",
       "/missing",
     ]) {
       const html = renderToString(

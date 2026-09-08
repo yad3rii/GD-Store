@@ -1,5 +1,10 @@
+import { ReviewList } from "./ServiceFeatures";
+import { visibleSection } from "../demo/service.mjs";
+import Showcase from "./Showcase";
+import { ReportButton } from "./Reports";
+import { cosmetics } from "../demo/community.mjs";
 import { useState, useEffect, useRef } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useDemo } from "../demo/context";
 import { games, price } from "../demo/model.mjs";
 import {
@@ -24,7 +29,10 @@ export function Modal({ title, onClose, children }) {
     <dialog
       ref={ref}
       className="modal"
-      onCancel={onClose}
+      onCancel={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -135,17 +143,7 @@ export function Game() {
                   <small>Демонстрационная оценка</small>
                 </span>
               </div>
-              {state.reviews
-                .filter((r) => r.game === g.id)
-                .map((r) => (
-                  <div className="review" key={r.id}>
-                    <Author id={r.author} />
-                    <span className="accent">
-                      {r.positive ? "Рекомендует" : "Не рекомендует"}
-                    </span>
-                    <p>{r.text}</p>
-                  </div>
-                ))}
+              <ReviewList game={g.id} />
               {owned ? (
                 <form
                   className="form-stack"
@@ -239,7 +237,7 @@ export function Game() {
     </>
   );
 }
-export function Achievements({ game, owned }) {
+export function Achievements({ owned }) {
   return (
     <div className="achievements">
       {["Первый шаг", "Картограф", "Новый горизонт", "Легенда Элиона"].map(
@@ -266,9 +264,8 @@ export function Achievements({ game, owned }) {
 export function Collection({ kind }) {
   const { state, me, act } = useDemo();
   const [search, setSearch] = useState(""),
-    [sort, setSort] = useState("title"),
-    [confirm, setConfirm] = useState(false);
-  const nav = useNavigate();
+    [sort, setSort] = useState("title");
+
   const list = games
     .filter(
       (g) =>
@@ -303,6 +300,22 @@ export function Collection({ kind }) {
           История заказов
         </Link>
       </Head>
+      {kind === "library" && (
+        <div className="library-collections-link">
+          <div>
+            <p className="eyebrow">ВАШИ ПОДБОРКИ</p>
+            <h3>Любимые миры — по своим полкам</h3>
+            <p>
+              {state.collections.filter((c) => c.owner === me?.id).length}{" "}
+              коллекций в библиотеке
+            </p>
+          </div>
+          <Link className="btn" to="/collections">
+            <Icon name="folder" />
+            Мои коллекции
+          </Link>
+        </div>
+      )}
       {kind === "library" && list.length > 0 && (
         <Link to={"/game/" + list[0].id} className="library-feature">
           <Art game={list[0]} />
@@ -395,31 +408,10 @@ export function Collection({ kind }) {
             <p className="muted">Итого в демозаказе</p>
             <strong>{money(total)}</strong>
           </div>
-          <button className="btn primary" onClick={() => setConfirm(true)}>
-            Оформить демозаказ <Icon name="arrow" />
-          </button>
+          <Link className="btn primary" to="/checkout">
+            Перейти к оформлению <Icon name="arrow" />
+          </Link>
         </div>
-      )}
-      {confirm && (
-        <Modal
-          title="Добавить игры в библиотеку?"
-          onClose={() => setConfirm(false)}
-        >
-          <p className="muted">
-            Это локальная демонстрация. Платёжные данные не нужны, деньги не
-            списываются.
-          </p>
-          <button
-            className="btn primary space"
-            onClick={() => {
-              if (act({ type: "checkout" }, "Игры добавлены в библиотеку"))
-                nav("/library");
-              setConfirm(false);
-            }}
-          >
-            Подтвердить демозаказ
-          </button>
-        </Modal>
       )}
     </Gate>
   );
@@ -435,9 +427,32 @@ export function Profile() {
       <Empty title="Профиль не найден" link="/login" label="Выбрать профиль" />
     );
   const own = me?.id === user.id;
-  const owned = games.filter((g) => state.library[user.id]?.includes(g.id));
+  const libraryVisible = visibleSection(
+    state,
+    user.id,
+    me?.id,
+    "libraryPrivacy",
+  );
+  const friendsVisible = visibleSection(
+    state,
+    user.id,
+    me?.id,
+    "friendsPrivacy",
+  );
+  const activityVisible = visibleSection(
+    state,
+    user.id,
+    me?.id,
+    "activityPrivacy",
+  );
+  const owned = games.filter(
+    (g) => libraryVisible && state.library[user.id]?.includes(g.id),
+  );
   const fs = state.friends.filter(
-    (f) => f.status === "accepted" && [f.from, f.to].includes(user.id),
+    (f) =>
+      friendsVisible &&
+      f.status === "accepted" &&
+      [f.from, f.to].includes(user.id),
   );
   const relation = state.friends.find(
     (f) => [f.from, f.to].includes(me?.id) && [f.from, f.to].includes(user.id),
@@ -445,7 +460,16 @@ export function Profile() {
   return (
     <>
       <div className="profile-cover">
-        <Art game={games.find((g) => g.id === user.cover) || games[0]} />
+        <Art
+          game={
+            games.find(
+              (g) =>
+                g.id ===
+                (cosmetics.find((x) => x.id === user.cosmeticBanner)?.game ||
+                  user.cover),
+            ) || games[0]
+          }
+        />
         <span className="cover-label">
           PLAYER SPACE / {user.handle.toUpperCase()}
         </span>
@@ -490,11 +514,20 @@ export function Profile() {
           </button>
         )}
       </div>
+      <div className="actions profile-tools">
+        {own ? (
+          <Link className="btn" to="/points-shop">
+            Оформление профиля ↗
+          </Link>
+        ) : (
+          <ReportButton user={user.id} />
+        )}
+      </div>
       <div className="profile-layout">
         <div>
           <div className="stats-strip">
             {[
-              [owned.length, "Игр"],
+              [libraryVisible ? owned.length : "—", "Игр"],
               [
                 owned.reduce(
                   (s, g) => s + (user.id === "karim" ? g.hours : 0),
@@ -502,7 +535,7 @@ export function Profile() {
                 ),
                 "Часов в игре",
               ],
-              [fs.length, "Друзей"],
+              [friendsVisible ? fs.length : "—", "Друзей"],
               [state.mods.filter((m) => m.author === user.id).length, "Работ"],
             ].map(([n, t]) => (
               <div key={t}>
@@ -523,37 +556,29 @@ export function Profile() {
             ))}
           </div>
           {tab === "Витрина" ? (
-            <>
-              <div className="section-title">
-                <h2>Любимые миры</h2>
-                <span className="muted">{owned.length} игр</span>
-              </div>
-              <div className="game-grid profile-games">
-                {owned.map((g) => (
-                  <GameCard key={g.id} game={g} />
-                ))}
-              </div>
-              {!owned.length && (
-                <Empty
-                  title="Витрина ещё пуста"
-                  text="Добавьте первую игру в библиотеку."
-                />
-              )}
-            </>
+            libraryVisible ? (
+              <Showcase key={user.id} user={user} />
+            ) : (
+              <p className="panel muted">
+                Библиотека и витрина скрыты владельцем.
+              </p>
+            )
           ) : tab === "Достижения" ? (
             <div className="panel">
               <h2>За пределами обычного</h2>
               <p className="muted space">Пример витрины достижений игрока</p>
               <Achievements
                 game={games[0]}
-                owned={user.id === "karim" && owned.length > 0}
+                owned={
+                  libraryVisible && user.id === "karim" && owned.length > 0
+                }
               />
             </div>
           ) : (
             <div className="panel">
               <h2>Последняя активность</h2>
               {state.activity
-                .filter((a) => a.author === user.id)
+                .filter((a) => activityVisible && a.author === user.id)
                 .map((a) => (
                   <div className="activity-row" key={a.id}>
                     <Icon name="spark" />
@@ -563,9 +588,12 @@ export function Profile() {
                     <small>{date(a.at)}</small>
                   </div>
                 ))}
-              {!state.activity.some((a) => a.author === user.id) && (
+              {(!activityVisible ||
+                !state.activity.some((a) => a.author === user.id)) && (
                 <p className="muted space">
-                  Здесь появятся новые игры, обсуждения и работы мастерской.
+                  {activityVisible
+                    ? "Здесь появятся новые игры, обсуждения и работы мастерской."
+                    : "Активность скрыта владельцем."}
                 </p>
               )}
             </div>
@@ -598,7 +626,11 @@ export function Profile() {
               </div>
             ))}
             {!fs.length && (
-              <p className="muted">Всё начинается с первой заявки.</p>
+              <p className="muted">
+                {friendsVisible
+                  ? "Всё начинается с первой заявки."
+                  : "Список друзей скрыт владельцем."}
+              </p>
             )}
           </div>
         </aside>
