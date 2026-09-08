@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from apps.accounts.models import Friendship
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework import status
@@ -53,6 +54,11 @@ class CheckoutTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="buyer", password="pass12345")
         self.friend = User.objects.create_user(username="friend", password="pass12345")
+        Friendship.objects.create(
+            from_user=self.user,
+            to_user=self.friend,
+            status="accepted",
+     )
         self.client.force_authenticate(self.user)
         self.game_a = make_game("Game A", "20.00")
         self.game_b = make_game("Game B", "30.00")

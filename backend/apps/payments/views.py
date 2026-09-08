@@ -134,37 +134,29 @@ class PaymentWebhookView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def _check_signature(self, request):
-        secret = getattr(
-            settings,
-            "PAYMENT_WEBHOOK_SECRET",
-            "",
-        )
+        secret = getattr(settings, "PAYMENT_WEBHOOK_SECRET", "")
 
-        if not secret:
-            return
+        if not secret or not secret.strip():
+            logger.error("Payment webhook rejected: secret is not configured")
+            raise PermissionDenied("Приём уведомлений об оплате отключён.")
 
-        signature = request.headers.get(
-            "X-Signature",
-            "",
-        )
+        signature = request.headers.get("X-Signature", "")
+
+        if (
+            len(signature) != 64
+            or any(char not in "0123456789abcdefABCDEF" for char in signature)
+        ):
+            raise PermissionDenied("Отсутствует или неверна подпись webhook'а.")
 
         expected = hmac.new(
-            secret.encode(),
+            secret.encode("utf-8"),
             request.body,
             hashlib.sha256,
         ).hexdigest()
 
-        if not hmac.compare_digest(
-            signature,
-            expected,
-        ):
-            logger.warning(
-                "Payment webhook rejected: bad signature"
-            )
-
-            raise PermissionDenied(
-                "Неверная подпись webhook'а."
-            )
+        if not hmac.compare_digest(signature.lower(), expected):
+            logger.warning("Payment webhook rejected: bad signature")
+            raise PermissionDenied("Неверная подпись webhook'а.")
 
     def post(self, request):
         self._check_signature(request)
@@ -277,18 +269,11 @@ class PaymentWebhookView(APIView):
 
             beneficiary = order.beneficiary
 
-            LibraryEntry.objects.bulk_create(
-                [
-                    LibraryEntry(
-                        user=beneficiary,
-                        game=item.game,
-                    )
-                    for item in order.items.select_related(
-                        "game"
-                    ).all()
-                ],
-                ignore_conflicts=True,
-            )
+            for item in order.items.all():
+             LibraryEntry.objects.get_or_create(
+                 user=beneficiary,
+                 game_id=item.game_id,
+             )
 
         logger.info(
             "Payment %s succeeded, "
