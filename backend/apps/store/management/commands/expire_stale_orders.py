@@ -1,9 +1,8 @@
 import logging
 
 from django.core.management.base import BaseCommand
-from django.utils import timezone
 
-from apps.store.models import Order
+from apps.store.services import expire_pending_orders
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,6 @@ class Command(BaseCommand):
     help = "Помечает просроченные заказы в статусе pending как expired."
 
     def handle(self, *args, **options):
-        stale = Order.objects.filter(status=Order.STATUS_PENDING, expires_at__lt=timezone.now())
-        count = stale.update(status=Order.STATUS_EXPIRED)
+        count = expire_pending_orders()
         logger.info("expire_stale_orders: помечено просроченными %s заказ(ов)", count)
         self.stdout.write(self.style.SUCCESS(f"Помечено просроченными: {count}"))

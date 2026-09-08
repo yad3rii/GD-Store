@@ -17,10 +17,18 @@ class OrderAdmin(admin.ModelAdmin):
     search_fields = ["id", "user__username", "user__email", "recipient__username"]
     date_hierarchy = "created_at"
     inlines = [OrderItemInline]
+    readonly_fields = [field.name for field in Order._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(PromoCode)
 class PromoCodeAdmin(admin.ModelAdmin):
+    readonly_fields = ["times_used"]
     list_display = ["code", "discount_percent", "times_used", "max_uses", "is_active", "valid_from", "valid_until"]
     list_filter = ["is_active"]
     search_fields = ["code"]

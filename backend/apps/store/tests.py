@@ -152,3 +152,263 @@ class OrderActionTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["status"], Order.STATUS_REFUNDED)
         self.assertFalse(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+
+
+from django.test import override_settings
+
+
+@override_settings(PAYMENT_WEBHOOK_SECRET="promo-test-secret")
+class PromoReservationTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="promo-buyer", password="pass12345")
+        self.client.force_authenticate(self.user)
+        self.game = make_game("Promo Game", "20.00")
+        self.promo = PromoCode.objects.create(code="ONCE", discount_percent=50, max_uses=1)
+
+    def checkout(self):
+        CartItem.objects.get_or_create(user=self.user, game=self.game)
+        response = self.client.post("/api/v1/store/cart/checkout/", {"promo_code": "ONCE"})
+        self.assertEqual(response.status_code, 201, response.data)
+        return Order.objects.get(pk=response.data["id"])
+
+    def payment(self, order):
+        from apps.payments.models import Payment
+        response = self.client.post("/api/v1/payments/create/", {"order_id": str(order.pk)})
+        self.assertEqual(response.status_code, 201, response.data)
+        return Payment.objects.get(order=order)
+
+    def webhook(self, payment, incoming_status):
+        import hashlib
+        import hmac
+        import json
+        body = json.dumps({
+            "provider_payment_id": payment.provider_payment_id, "status": incoming_status,
+        }).encode()
+        signature = hmac.new(b"promo-test-secret", body, hashlib.sha256).hexdigest()
+        response = self.client.generic(
+            "POST", "/api/v1/payments/webhook/", data=body,
+            content_type="application/json", HTTP_X_SIGNATURE=signature,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def expire(self, order):
+        Order.objects.filter(pk=order.pk).update(expires_at=timezone.now() - timezone.timedelta(seconds=1))
+
+    def assert_uses(self, expected):
+        self.promo.refresh_from_db()
+        self.assertEqual(self.promo.times_used, expected)
+
+    def test_cancel_releases_once_and_code_can_be_used_again(self):
+        order = self.checkout()
+        self.assert_uses(1)
+        url = f"/api/v1/store/orders/{order.pk}/cancel/"
+        self.assertEqual(self.client.post(url).status_code, 200)
+        self.assert_uses(0)
+        self.assertEqual(self.client.post(url).status_code, 400)
+        self.assert_uses(0)
+        self.checkout()
+        self.assert_uses(1)
+
+    def test_failed_payment_and_retry_keep_one_reservation(self):
+        order = self.checkout()
+        payment = self.payment(order)
+        self.webhook(payment, "failed")
+        self.assert_uses(1)
+        self.payment(order)
+        self.assert_uses(1)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.STATUS_PENDING)
+
+    def test_cleanup_releases_once_including_exact_deadline(self):
+        from django.core.management import call_command
+        from unittest.mock import patch
+        from io import StringIO
+        order = self.checkout()
+        deadline = timezone.now()
+        Order.objects.filter(pk=order.pk).update(expires_at=deadline)
+        with patch("apps.store.services.timezone.now", return_value=deadline):
+            call_command("expire_stale_orders", stdout=StringIO())
+            call_command("expire_stale_orders", stdout=StringIO())
+        self.assert_uses(0)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.STATUS_EXPIRED)
+
+    def test_create_payment_for_expired_order_releases_reservation(self):
+        order = self.checkout()
+        self.expire(order)
+        response = self.client.post("/api/v1/payments/create/", {"order_id": str(order.pk)})
+        self.assertEqual(response.status_code, 400)
+        self.assert_uses(0)
+
+    def test_duplicate_failed_webhook_after_expiry_releases_reservation(self):
+        order = self.checkout()
+        payment = self.payment(order)
+        self.webhook(payment, "failed")
+        self.expire(order)
+        self.webhook(payment, "failed")
+        self.webhook(payment, "failed")
+        self.assert_uses(0)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.STATUS_EXPIRED)
+
+    def test_checkout_reclaims_expired_reservation_without_scheduled_command(self):
+        first = self.checkout()
+        self.expire(first)
+        second = self.checkout()
+        self.assertNotEqual(first.pk, second.pk)
+        self.assert_uses(1)
+        first.refresh_from_db()
+        self.assertEqual(first.status, Order.STATUS_EXPIRED)
+
+    def test_live_reservation_blocks_second_checkout_without_deleting_cart(self):
+        self.checkout()
+        CartItem.objects.create(user=self.user, game=self.game)
+        response = self.client.post("/api/v1/store/cart/checkout/", {"promo_code": "ONCE"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 1)
+        self.assertTrue(CartItem.objects.filter(user=self.user, game=self.game).exists())
+        self.assert_uses(1)
+
+    def test_success_and_refund_do_not_return_consumed_use(self):
+        order = self.checkout()
+        payment = self.payment(order)
+        self.webhook(payment, "succeeded")
+        self.assert_uses(1)
+        self.assertEqual(self.client.post(f"/api/v1/store/orders/{order.pk}/refund/").status_code, 200)
+        self.webhook(payment, "succeeded")
+        self.webhook(payment, "failed")
+        self.assert_uses(1)
+
+    def test_late_success_cannot_consume_another_orders_reservation(self):
+        first = self.checkout()
+        first_payment = self.payment(first)
+        self.expire(first)
+        second = self.checkout()
+        self.webhook(first_payment, "succeeded")
+        self.assert_uses(1)
+        self.assertTrue(first_payment.attempts.get().review_required)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.status, Order.STATUS_EXPIRED)
+        self.assertEqual(second.status, Order.STATUS_PENDING)
+        self.assertFalse(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+        self.webhook(self.payment(second), "succeeded")
+        self.assert_uses(1)
+        self.assertEqual(LibraryEntry.objects.filter(user=self.user, game=self.game).count(), 1)
+
+    def test_transaction_error_rolls_back_reservation_and_preserves_cart(self):
+        from unittest.mock import patch
+        CartItem.objects.create(user=self.user, game=self.game)
+        with patch("apps.store.views.OrderItem.objects.bulk_create", side_effect=RuntimeError("test rollback")):
+            with self.assertRaisesMessage(RuntimeError, "test rollback"):
+                self.client.post("/api/v1/store/cart/checkout/", {"promo_code": "ONCE"})
+        self.assert_uses(0)
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+        self.assertTrue(CartItem.objects.filter(user=self.user, game=self.game).exists())
+
+    def test_invalid_counter_does_not_cancel_order_or_go_negative(self):
+        order = self.checkout()
+        PromoCode.objects.filter(pk=self.promo.pk).update(times_used=0)
+        response = self.client.post(f"/api/v1/store/orders/{order.pk}/cancel/")
+        self.assertEqual(response.status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.STATUS_PENDING)
+        self.assert_uses(0)
+
+
+class PromoCounterMigrationTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create(username="legacy-promo-user")
+
+    def migrate_counters(self):
+        from importlib import import_module
+        from types import SimpleNamespace
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+        apps = MigrationExecutor(connection).loader.project_state([
+            ("store", "0002_promocode_alter_cartitem_options_alter_order_options_and_more"),
+        ]).apps
+        migration = import_module("apps.store.migrations.0003_release_legacy_promo_reservations")
+        migration.release_legacy_reservations(apps, SimpleNamespace(connection=connection))
+
+    def test_old_closed_orders_are_released_paid_and_pending_uses_remain(self):
+        promo = PromoCode.objects.create(code="LEGACY", discount_percent=10, times_used=7)
+        for state in ("pending", "paid", "refunded", "cancelled", "expired", "failed"):
+            Order.objects.create(user=self.user, total=Decimal("9.00"), promo_code=promo, status=state)
+        # Extra unattributed use remains untouched (e.g. old deleted order).
+        self.migrate_counters()
+        promo.refresh_from_db()
+        self.assertEqual(promo.times_used, 4)
+
+    def test_inconsistent_counter_stops_before_any_counter_changes(self):
+        promo = PromoCode.objects.create(code="BROKEN", discount_percent=10, times_used=0)
+        Order.objects.create(user=self.user, total=Decimal("9.00"), promo_code=promo, status="cancelled")
+        with self.assertRaisesMessage(RuntimeError, "inconsistent"):
+            self.migrate_counters()
+        promo.refresh_from_db()
+        self.assertEqual(promo.times_used, 0)
+
+    def test_pending_legacy_reservation_without_expiry_gets_grace_period(self):
+        promo = PromoCode.objects.create(code="NULLTTL", discount_percent=10, times_used=1)
+        order = Order.objects.create(user=self.user, total=Decimal("9.00"), promo_code=promo)
+        Order.objects.filter(pk=order.pk).update(expires_at=None)
+        before = timezone.now()
+        self.migrate_counters()
+        order.refresh_from_db()
+        self.assertGreaterEqual(order.expires_at, before + timezone.timedelta(minutes=30))
+
+
+from django.test import TransactionTestCase, skipUnlessDBFeature
+
+
+class PromoConcurrencyTests(TransactionTestCase):
+    """Real independent DB connections; SQLite deliberately skips these tests."""
+
+    def race(self, actions):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from django.db import connections
+        from rest_framework.test import APIClient
+        barrier = Barrier(len(actions))
+
+        def run(action):
+            user, url, payload = action
+            client = APIClient()
+            client.force_authenticate(user)
+            try:
+                barrier.wait(timeout=10)
+                response = client.post(url, payload)
+                return response.status_code
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=len(actions)) as executor:
+            futures = [executor.submit(run, action) for action in actions]
+            return [future.result(timeout=30) for future in futures]
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_two_checkouts_cannot_reserve_the_last_use_twice(self):
+        promo = PromoCode.objects.create(code="LAST", discount_percent=10, max_uses=1)
+        actions = []
+        for index in range(2):
+            user = get_user_model().objects.create(username=f"parallel-{index}")
+            game = make_game(f"Parallel Game {index}")
+            CartItem.objects.create(user=user, game=game)
+            actions.append((user, "/api/v1/store/cart/checkout/", {"promo_code": "LAST"}))
+        self.assertEqual(sorted(self.race(actions)), [201, 400])
+        promo.refresh_from_db()
+        self.assertEqual(promo.times_used, 1)
+        self.assertEqual(Order.objects.filter(promo_code=promo).count(), 1)
+        self.assertEqual(CartItem.objects.count(), 1)
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_concurrent_cancellations_release_only_once(self):
+        user = get_user_model().objects.create(username="parallel-cancel")
+        promo = PromoCode.objects.create(code="CANCEL", discount_percent=10, times_used=1, max_uses=1)
+        order = Order.objects.create(user=user, total=Decimal("9.00"), promo_code=promo)
+        action = (user, f"/api/v1/store/orders/{order.pk}/cancel/", {})
+        self.assertEqual(sorted(self.race([action, action])), [200, 400])
+        promo.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(promo.times_used, 0)
+        self.assertEqual(order.status, Order.STATUS_CANCELLED)

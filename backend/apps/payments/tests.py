@@ -13,7 +13,7 @@ from apps.catalog.models import Game
 from apps.library.models import LibraryEntry
 from apps.store.models import CartItem, Order
 
-from .models import Payment
+from .models import Payment, PaymentAttempt
 
 
 User = get_user_model()
@@ -491,3 +491,211 @@ class PaymentsTestCase(APITestCase):
         self.assertEqual(first.pk, legacy.pk)
         self.assertTrue(first.provider_payment_id)
         self.assertEqual(first.provider_payment_id, second.provider_payment_id)
+
+    def fail_and_retry(self):
+        first = self.create_payment()
+        response = self.post_webhook({
+            "provider_payment_id": first.provider_payment_id, "status": "failed",
+        })
+        self.assertEqual(response.status_code, 200)
+        second = self.create_payment()
+        return first.provider_payment_id, second.provider_payment_id
+
+    def test_retry_preserves_failed_attempt_id_amount_and_payload(self):
+        first_id, second_id = self.fail_and_retry()
+        first = PaymentAttempt.objects.get(provider_payment_id=first_id)
+        second = PaymentAttempt.objects.get(provider_payment_id=second_id)
+        self.assertEqual(first.payment_id, second.payment_id)
+        self.assertEqual(first.status, Payment.STATUS_FAILED)
+        self.assertEqual(first.amount, Decimal("15.00"))
+        self.assertEqual(first.raw_payload, {
+            "provider_payment_id": first_id, "status": "failed",
+        })
+        self.assertEqual(second.status, Payment.STATUS_CREATED)
+        self.assertEqual(second.raw_payload, {})
+        self.create_payment()
+        self.assertEqual(PaymentAttempt.objects.filter(payment=first.payment).count(), 2)
+
+    def test_old_failed_notification_does_not_fail_current_attempt(self):
+        first_id, second_id = self.fail_and_retry()
+        response = self.post_webhook({"provider_payment_id": first_id, "status": "failed"})
+        self.assertEqual(response.status_code, 200)
+        payment = Payment.objects.get(order=self.order)
+        self.assertEqual(payment.status, Payment.STATUS_CREATED)
+        self.assertEqual(payment.provider_payment_id, second_id)
+        self.assertEqual(payment.raw_payload, {})
+        self.assertEqual(PaymentAttempt.objects.get(provider_payment_id=second_id).status,
+                         Payment.STATUS_CREATED)
+
+    def test_old_success_can_fulfill_order_without_losing_new_attempt(self):
+        first_id, second_id = self.fail_and_retry()
+        response = self.post_webhook({"provider_payment_id": first_id, "status": "succeeded"})
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        payment = Payment.objects.get(order=self.order)
+        self.assertEqual(self.order.status, Order.STATUS_PAID)
+        self.assertEqual(payment.provider_payment_id, first_id)
+        self.assertFalse(payment.attempts.filter(review_required=True).exists())
+        self.assertTrue(payment.attempts.filter(provider_payment_id=second_id).exists())
+        response = self.post_webhook({"provider_payment_id": second_id, "status": "failed"})
+        self.assertEqual(response.status_code, 200)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.STATUS_SUCCEEDED)
+        self.assertEqual(payment.provider_payment_id, first_id)
+        self.assertEqual(LibraryEntry.objects.filter(user=self.user, game=self.game).count(), 1)
+
+    def test_two_successes_are_preserved_and_second_requires_review(self):
+        first_id, second_id = self.fail_and_retry()
+        for attempt_id in (second_id, first_id, first_id):
+            self.assertEqual(self.post_webhook({
+                "provider_payment_id": attempt_id, "status": "succeeded",
+            }).status_code, 200)
+        payment = Payment.objects.get(order=self.order)
+        self.assertEqual(payment.provider_payment_id, second_id)
+        self.assertEqual(payment.attempts.filter(status=Payment.STATUS_SUCCEEDED).count(), 2)
+        first = payment.attempts.get(provider_payment_id=first_id)
+        self.assertTrue(first.review_required)
+        self.assertEqual(first.review_reason, "additional_success")
+        self.assertEqual(LibraryEntry.objects.filter(user=self.user, game=self.game).count(), 1)
+        response = self.client.post(f"/api/v1/store/orders/{self.order.id}/refund/")
+        self.assertEqual(response.status_code, 409)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.STATUS_PAID)
+        self.assertTrue(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+        recreate = self.client.post("/api/v1/payments/create/", {"order_id": str(self.order.pk)})
+        self.assertEqual(recreate.status_code, 400)
+        self.assertEqual(payment.attempts.count(), 2)
+
+    def test_success_after_expiry_is_recorded_for_review_without_grant(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        payment = self.create_payment()
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        payload = {"provider_payment_id": payment.provider_payment_id, "status": "succeeded"}
+        self.assertEqual(self.post_webhook(payload).status_code, 200)
+        self.assertEqual(self.post_webhook(payload).status_code, 200)
+        payment.refresh_from_db()
+        self.order.refresh_from_db()
+        attempt = payment.attempts.get()
+        self.assertEqual(payment.status, Payment.STATUS_SUCCEEDED)
+        self.assertEqual(attempt.status, Payment.STATUS_SUCCEEDED)
+        self.assertEqual(self.order.status, Order.STATUS_EXPIRED)
+        self.assertTrue(attempt.review_required)
+        self.assertEqual(attempt.raw_payload, payload)
+        self.assertFalse(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+
+    def test_success_after_cancel_is_recorded_without_reopening_order(self):
+        payment = self.create_payment()
+        response = self.client.post(f"/api/v1/store/orders/{self.order.id}/cancel/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.post_webhook({
+            "provider_payment_id": payment.provider_payment_id, "status": "succeeded",
+        }).status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.STATUS_CANCELLED)
+        attempt = payment.attempts.get()
+        self.assertEqual(attempt.status, Payment.STATUS_SUCCEEDED)
+        self.assertTrue(attempt.review_required)
+        self.assertFalse(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+
+    def test_refund_preserves_attempt_and_its_terminal_status(self):
+        payment = self.create_payment()
+        self.assertEqual(self.post_webhook({
+            "provider_payment_id": payment.provider_payment_id, "status": "succeeded",
+        }).status_code, 200)
+        self.assertEqual(self.client.post(
+            f"/api/v1/store/orders/{self.order.id}/refund/",
+        ).status_code, 200)
+        for event in ("failed", "succeeded"):
+            self.assertEqual(self.post_webhook({
+                "provider_payment_id": payment.provider_payment_id, "status": event,
+            }).status_code, 200)
+        attempt = payment.attempts.get()
+        self.assertEqual(attempt.status, Payment.STATUS_REFUNDED)
+        self.assertFalse(attempt.review_required)
+
+    def test_another_attempt_success_after_refund_requires_review(self):
+        first_id, second_id = self.fail_and_retry()
+        self.assertEqual(self.post_webhook({"provider_payment_id": second_id, "status": "succeeded"}).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/v1/store/orders/{self.order.id}/refund/").status_code, 200)
+        self.assertEqual(self.post_webhook({"provider_payment_id": first_id, "status": "succeeded"}).status_code, 200)
+        payment = Payment.objects.get(order=self.order)
+        self.order.refresh_from_db()
+        self.assertEqual(payment.status, Payment.STATUS_REFUNDED)
+        self.assertEqual(self.order.status, Order.STATUS_REFUNDED)
+        self.assertEqual(payment.attempts.get(provider_payment_id=second_id).status, Payment.STATUS_REFUNDED)
+        self.assertTrue(payment.attempts.get(provider_payment_id=first_id).review_required)
+        self.assertFalse(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+
+    def test_amount_changed_after_checkout_requires_review(self):
+        payment = self.create_payment()
+        Order.objects.filter(pk=self.order.pk).update(total=Decimal("99.00"))
+        self.assertEqual(self.post_webhook({
+            "provider_payment_id": payment.provider_payment_id, "status": "succeeded",
+        }).status_code, 200)
+        attempt = payment.attempts.get()
+        self.assertEqual(attempt.amount, Decimal("15.00"))
+        self.assertEqual(attempt.review_reason, "amount_mismatch")
+        self.assertTrue(attempt.review_required)
+        self.assertFalse(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+
+    def test_unknown_attempt_is_404_without_changing_current_payment(self):
+        payment = self.create_payment()
+        self.assertEqual(self.post_webhook({"provider_payment_id": "unknown", "status": "succeeded"}).status_code, 404)
+        self.assert_payment_unchanged(payment)
+
+
+class PaymentAttemptBackfillTests(APITestCase):
+    def run_backfill(self):
+        from importlib import import_module
+        from types import SimpleNamespace
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+
+        apps = MigrationExecutor(connection).loader.project_state([
+            ("payments", "0003_paymentattempt"),
+        ]).apps
+        migration = import_module("apps.payments.migrations.0004_backfill_payment_attempts")
+        migration.backfill_attempts(apps, SimpleNamespace(connection=connection))
+
+    def make_legacy_payment(self, provider_id, payment_status=Payment.STATUS_CREATED):
+        user, _ = User.objects.get_or_create(username="legacy-buyer")
+        order = Order.objects.create(user=user, total=Decimal("12.50"))
+        return Payment.objects.create(
+            order=order, amount=Decimal("12.50"), provider_payment_id=provider_id,
+            status=payment_status, raw_payload={"legacy": True},
+        )
+
+    def test_backfill_preserves_existing_statuses_ids_amounts_and_timestamps(self):
+        originals = [self.make_legacy_payment(f"legacy-{s}", s) for s in (
+            Payment.STATUS_CREATED, Payment.STATUS_FAILED,
+            Payment.STATUS_SUCCEEDED, Payment.STATUS_REFUNDED,
+        )]
+        self.run_backfill()
+        self.assertEqual(PaymentAttempt.objects.count(), 4)
+        for original in originals:
+            with self.subTest(status=original.status):
+                attempt = PaymentAttempt.objects.get(payment=original)
+                self.assertEqual(attempt.provider_payment_id, original.provider_payment_id)
+                self.assertEqual(attempt.amount, original.amount)
+                self.assertEqual(attempt.status, original.status)
+                self.assertEqual(attempt.raw_payload, original.raw_payload)
+                self.assertEqual(attempt.created_at, original.created_at)
+                self.assertEqual(attempt.updated_at, original.updated_at)
+                original.refresh_from_db()
+                self.assertEqual(original.provider_payment_id, attempt.provider_payment_id)
+
+    def test_backfill_skips_blank_ids_without_deleting_payment(self):
+        original = self.make_legacy_payment("")
+        self.run_backfill()
+        self.assertEqual(PaymentAttempt.objects.count(), 0)
+        self.assertTrue(Payment.objects.filter(pk=original.pk).exists())
+
+    def test_backfill_rejects_ambiguous_ids_before_creating_attempts(self):
+        self.make_legacy_payment("duplicate-id")
+        self.make_legacy_payment("duplicate-id")
+        with self.assertRaisesMessage(RuntimeError, "duplicate provider_payment_id"):
+            self.run_backfill()
+        self.assertEqual(PaymentAttempt.objects.count(), 0)
+        self.assertEqual(Payment.objects.count(), 2)

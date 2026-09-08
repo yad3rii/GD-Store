@@ -4,6 +4,7 @@ from apps.catalog.serializers import GameListSerializer
 from apps.library.models import LibraryEntry
 from apps.accounts.models import Friendship
 from .models import CartItem, Order, OrderItem, PromoCode, Wishlist
+from .services import expire_pending_orders
 
 
 class CartItemSerializer(serializers.ModelSerializer):
@@ -74,6 +75,10 @@ class CheckoutSerializer(serializers.Serializer):
             promo = PromoCode.objects.get(code__iexact=value)
         except PromoCode.DoesNotExist:
             raise serializers.ValidationError("Промокод не найден.")
+        # Clear due reservations before checking availability. The checkout
+        # rechecks under the PromoCode lock to arbitrate the final available use.
+        expire_pending_orders(promo_id=promo.pk)
+        promo.refresh_from_db()
         if not promo.is_valid():
             raise serializers.ValidationError("Промокод недействителен или истёк.")
         return promo

@@ -25,6 +25,7 @@ from .serializers import (
     WishlistSerializer,
 )
 from .throttles import CheckoutThrottle, OrderActionThrottle
+from .services import close_pending_order
 
 
 logger = logging.getLogger(__name__)
@@ -115,11 +116,6 @@ class CartViewSet(viewsets.ModelViewSet):
                 if item.game_id not in owned_game_ids
             ]
 
-            if already_owned:
-                CartItem.objects.filter(
-                    id__in=[item.id for item in already_owned]
-                ).delete()
-
             if not purchasable:
                 return Response(
                     {
@@ -154,6 +150,9 @@ class CartViewSet(viewsets.ModelViewSet):
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+
+            if already_owned:
+                CartItem.objects.filter(id__in=[item.id for item in already_owned]).delete()
 
             subtotal = sum(
                 (
@@ -306,8 +305,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            order.status = Order.STATUS_CANCELLED
-            order.save(update_fields=["status"])
+            close_pending_order(order, Order.STATUS_CANCELLED)
 
         logger.info(
             "Order %s cancelled by user %s",
@@ -345,6 +343,14 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            # Lock order matches webhook/create: Order -> Payment -> attempts.
+            payment = Payment.objects.select_for_update().filter(order=order).first()
+            if payment and payment.attempts.filter(review_required=True).exists():
+                return Response(
+                    {"detail": "Есть платёж, требующий сверки. Автоматический возврат недоступен."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
             beneficiary = order.beneficiary
 
             for item in order.items.all():
@@ -374,11 +380,13 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             order.status = Order.STATUS_REFUNDED
             order.save(update_fields=["status"])
 
-            Payment.objects.filter(
-                order=order
-            ).update(
-                status=Payment.STATUS_REFUNDED
-            )
+            if payment:
+                payment.status = Payment.STATUS_REFUNDED
+                payment.save(update_fields=["status", "updated_at"])
+                payment.attempts.filter(
+                    provider_payment_id=payment.provider_payment_id,
+                    status=Payment.STATUS_SUCCEEDED,
+                ).update(status=Payment.STATUS_REFUNDED, updated_at=payment.updated_at)
 
         logger.info(
             "Order %s refunded by user %s",

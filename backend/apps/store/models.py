@@ -35,7 +35,11 @@ class Wishlist(models.Model):
 
 
 class PromoCode(models.Model):
-    """Промокод на процентную скидку. Проверяется/списывается в CartViewSet.checkout."""
+    """times_used = оплаченные применения + резервы pending-заказов.
+
+    Cancel/expiry освобождают резерв. Оплата сохраняет использование;
+    refund не возвращает лимит, чтобы не создавать цикл повторной скидки.
+    """
     code = models.CharField(max_length=32, unique=True)
     discount_percent = models.PositiveSmallIntegerField()
     max_uses = models.PositiveIntegerField(null=True, blank=True, help_text="Пусто = без ограничения")

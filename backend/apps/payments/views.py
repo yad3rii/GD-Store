@@ -6,17 +6,17 @@ import uuid
 from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.generics import CreateAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.library.models import LibraryEntry
 from apps.store.models import Order
+from apps.store.services import expire_order_if_due
 
 from .models import Payment
+from .services import apply_webhook, ensure_current_attempt
 from .serializers import (
     CreatePaymentSerializer,
     PaymentSerializer,
@@ -48,14 +48,7 @@ class CreatePaymentView(CreateAPIView):
                 user=request.user,
             )
 
-            if (
-                order.expires_at is not None
-                and timezone.now() >= order.expires_at
-                and order.status == Order.STATUS_PENDING
-            ):
-                order.status = Order.STATUS_EXPIRED
-                order.save(update_fields=["status"])
-
+            if expire_order_if_due(order):
                 return Response(
                     {"detail": "Срок оплаты заказа истёк."},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -101,6 +94,15 @@ class CreatePaymentView(CreateAPIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            if payment.attempts.filter(review_required=True).exists():
+                return Response(
+                    {"detail": "Платёж требует сверки. Новая попытка недоступна."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            # До смены текущего ID сохраняем предыдущую попытку и её результат.
+            ensure_current_attempt(payment)
+
             # Повторный запрос должен вернуть действующую попытку без изменений.
             # Пустой ID возможен у старых записей, созданных вне этого endpoint.
             if (
@@ -113,6 +115,7 @@ class CreatePaymentView(CreateAPIView):
                 payment.provider_payment_id = uuid.uuid4().hex
                 payment.raw_payload = {}
                 payment.save()
+                ensure_current_attempt(payment)
 
         logger.info(
             "Payment %s checkout returned for order %s to user %s",
@@ -182,127 +185,5 @@ class PaymentWebhookView(APIView):
             "status"
         ]
 
-        # Поиск связи без блокировки. Все денежные операции берут locks
-        # в одном порядке: Order -> Payment (как create и refund).
-        payment_ref = get_object_or_404(
-            Payment.objects.only("id", "order_id"),
-            provider_payment_id=provider_payment_id,
-        )
-
-        with transaction.atomic():
-            order = get_object_or_404(
-                Order.objects.select_for_update(),
-                pk=payment_ref.order_id,
-            )
-            # За время ожидания lock могла начаться другая попытка.
-            # Перепроверяем ID и связь, а не используем устаревший объект.
-            payment = get_object_or_404(
-                Payment.objects.select_for_update(),
-                pk=payment_ref.pk,
-                order_id=order.pk,
-                provider_payment_id=provider_payment_id,
-            )
-
-            # Задержавшееся failed/succeeded не отменяет успех или возврат.
-            if payment.status in (
-                Payment.STATUS_SUCCEEDED,
-                Payment.STATUS_REFUNDED,
-            ):
-                return Response(
-                    status=status.HTTP_200_OK
-                )
-
-            payment.raw_payload = request.data
-
-            if webhook_status == "failed":
-                payment.status = Payment.STATUS_FAILED
-                payment.save()
-
-                # Не переводим заказ в failed:
-                # пользователь может повторить попытку оплаты.
-                if (
-                    order.status == Order.STATUS_PENDING
-                    and order.expires_at is not None
-                    and timezone.now() >= order.expires_at
-                ):
-                    order.status = Order.STATUS_EXPIRED
-                    order.save(
-                        update_fields=["status"]
-                    )
-
-                logger.warning(
-                    "Payment %s failed for order %s",
-                    payment.id,
-                    order.id,
-                )
-
-                return Response(
-                    status=status.HTTP_200_OK
-                )
-
-            # Пришёл succeeded, но заказ уже нельзя оплачивать.
-            if order.status != Order.STATUS_PENDING:
-                payment.status = Payment.STATUS_FAILED
-                payment.save()
-
-                logger.warning(
-                    "Successful webhook ignored for "
-                    "order %s in status %s",
-                    order.id,
-                    order.status,
-                )
-
-                return Response(
-                    status=status.HTTP_200_OK
-                )
-
-            # Не принимаем успешную оплату после истечения заказа.
-            if (
-                order.expires_at is not None
-                and timezone.now() >= order.expires_at
-            ):
-                order.status = Order.STATUS_EXPIRED
-                order.save(
-                    update_fields=["status"]
-                )
-
-                payment.status = Payment.STATUS_FAILED
-                payment.save()
-
-                logger.warning(
-                    "Successful webhook ignored for "
-                    "expired order %s",
-                    order.id,
-                )
-
-                return Response(
-                    status=status.HTTP_200_OK
-                )
-
-            payment.status = Payment.STATUS_SUCCEEDED
-            payment.save()
-
-            order.status = Order.STATUS_PAID
-            order.save(
-                update_fields=["status"]
-            )
-
-            beneficiary = order.beneficiary
-
-            for item in order.items.all():
-                LibraryEntry.objects.get_or_create(
-                    user=beneficiary,
-                    game_id=item.game_id,
-                )
-
-        logger.info(
-            "Payment %s succeeded, "
-            "order %s granted to user %s",
-            payment.id,
-            order.id,
-            beneficiary.id,
-        )
-
-        return Response(
-            status=status.HTTP_200_OK
-        )
+        apply_webhook(provider_payment_id, webhook_status, request.data)
+        return Response(status=status.HTTP_200_OK)
