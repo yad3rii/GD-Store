@@ -1,3 +1,5 @@
+import { useAuthStore } from "../store/authStore";
+import { apiError } from "../api/contracts";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getGame } from "../api/catalog";
@@ -5,6 +7,7 @@ import { addToCart } from "../api/store";
 import Price from "../components/Price";
 import Icon from "../components/Icon";
 export default function GamePage() {
+  const {sessionId, accessToken} = useAuthStore();
   const { slug } = useParams(),
     qc = useQueryClient();
   const {
@@ -12,7 +15,7 @@ export default function GamePage() {
     isLoading,
     error,
     refetch,
-  } = useQuery({ queryKey: ["game", slug], queryFn: () => getGame(slug) });
+  } = useQuery({ queryKey: ["game", sessionId, slug], queryFn: ({signal}) => getGame(slug, {signal}) });
   const add = useMutation({
     mutationKey: ["add", slug],
     mutationFn: () => addToCart(game.id),
@@ -59,12 +62,13 @@ export default function GamePage() {
           <Price game={game} />
           <button
             className="button primary"
-            disabled={add.isPending}
+            disabled={add.isPending || !accessToken}
             onClick={() => add.mutate()}
           >
             <Icon name="cart" />
             {add.isPending ? "Добавляем…" : "Добавить в корзину"}
           </button>
+          {!accessToken && <Link to="/login">Войдите, чтобы купить игру</Link>}
           {add.isSuccess && (
             <Link className="status-message" to="/cart" role="status">
               Игра в корзине. Перейти →
@@ -72,8 +76,7 @@ export default function GamePage() {
           )}
           {add.isError && (
             <p className="error-message" role="alert">
-              Не удалось добавить игру. Проверьте, выполнен ли вход, и
-              попробуйте снова.
+              {apiError(add.error, "Не удалось добавить игру. Попробуйте снова.")}
             </p>
           )}
         </aside>

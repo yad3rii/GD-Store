@@ -25,6 +25,7 @@ from .serializers import (
     WishlistSerializer,
 )
 from .throttles import CheckoutThrottle, OrderActionThrottle
+from .cart_snapshot import cart_summary, matches_confirmation
 from .services import (
     close_pending_order, lock_order_participants, check_order_participants,
     pending_order_contains_games,
@@ -43,7 +44,7 @@ class CartViewSet(viewsets.ModelViewSet):
         return (
             CartItem.objects
             .filter(user=self.request.user)
-            .select_related("game")
+            .select_related("game").prefetch_related("game__genres", "game__tags")
         )
 
     def get_serializer_class(self):
@@ -77,6 +78,16 @@ class CartViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        items = list(self.get_queryset())
+        data, reasons = cart_summary(request.user.pk, items)
+        rows = CartItemSerializer(items, many=True, context=self.get_serializer_context()).data
+        for row, item in zip(rows, items):
+            row["unavailable_reason"] = reasons[item.pk]
+        data["results"] = rows
+        return Response(data)
+
     @action(detail=False, methods=["post"])
     def checkout(self, request):
         checkout_data = CheckoutSerializer(
@@ -99,8 +110,20 @@ class CartViewSet(viewsets.ModelViewSet):
                 CartItem.objects
                 .select_for_update()
                 .filter(user=request.user)
-                .select_related("game")
+                .select_related("game").prefetch_related("game__genres", "game__tags")
             )
+
+            token = checkout_data.validated_data.get("checkout_token")
+            if token and not matches_confirmation(token, request.user.pk, beneficiary.pk, items):
+                return Response(
+                    {"detail": "Корзина изменилась или подтверждение истекло. Обновите её перед оформлением."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if any(not item.game.is_published for item in items):
+                return Response(
+                    {"detail": "В корзине есть недоступная игра. Удалите её перед оформлением."},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
             owned_game_ids = set(
                 LibraryEntry.objects
@@ -231,7 +254,7 @@ class CartViewSet(viewsets.ModelViewSet):
         )
 
         return Response(
-            OrderSerializer(order).data,
+            OrderSerializer(order, context=self.get_serializer_context()).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -243,7 +266,7 @@ class WishlistViewSet(viewsets.ModelViewSet):
         return (
             Wishlist.objects
             .filter(user=self.request.user)
-            .select_related("game")
+            .select_related("game").prefetch_related("game__genres", "game__tags")
         )
 
     def get_serializer_class(self):
@@ -284,7 +307,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 "recipient",
                 "promo_code",
             )
-            .prefetch_related("items__game")
+            .prefetch_related("items__game__genres", "items__game__tags")
         )
 
     def get_throttles(self):
@@ -326,7 +349,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             request.user.id,
         )
 
-        return Response(OrderSerializer(order).data)
+        return Response(OrderSerializer(order, context=self.get_serializer_context()).data)
 
     @action(detail=True, methods=["post"])
     def refund(self, request, pk=None):
@@ -340,7 +363,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             order = (
                 Order.objects
                 .select_for_update()
-                .prefetch_related("items__game")
+                .prefetch_related("items__game__genres", "items__game__tags")
                 .get(
                     pk=reference.pk,
                     user=request.user,
@@ -411,4 +434,4 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             request.user.id,
         )
 
-        return Response(OrderSerializer(order).data)
+        return Response(OrderSerializer(order, context=self.get_serializer_context()).data)

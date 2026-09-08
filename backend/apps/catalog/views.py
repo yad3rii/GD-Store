@@ -1,3 +1,5 @@
+from decimal import Decimal
+from django.db.models import DecimalField, ExpressionWrapper, F, Value
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets
 from rest_framework.filters import OrderingFilter, SearchFilter
@@ -33,22 +35,18 @@ class GameViewSet(viewsets.ModelViewSet):
 
     filterset_class = GameFilter
     search_fields = ["title", "short_description", "description"]
-    ordering_fields = ["price", "release_date", "created_at"]
+    ordering_fields = ["price", "effective_price", "release_date", "created_at"]
     lookup_field = "slug"
 
     def get_queryset(self):
-        qs = (
-            Game.objects
-            .select_related("requirements")
-            .prefetch_related(
-                "genres",
-                "tags",
-                "developers",
-                "publishers",
-                "screenshots",
-            )
-            .order_by("-created_at")
-        )
+        qs = Game.objects.annotate(
+            effective_price=ExpressionWrapper(
+                F("price") * (Value(Decimal("100")) - F("discount_percent")) * Value(Decimal("0.01")),
+                output_field=DecimalField(max_digits=14, decimal_places=6),
+            ),
+        ).prefetch_related("genres", "tags").order_by("-created_at", "id")
+        if self.action == "retrieve":
+            qs = qs.select_related("requirements").prefetch_related("developers", "publishers", "screenshots")
 
         user = self.request.user
 
@@ -68,14 +66,14 @@ class GameViewSet(viewsets.ModelViewSet):
 
 
 class GenreViewSet(viewsets.ModelViewSet):
-    queryset = Genre.objects.all()
+    queryset = Genre.objects.order_by("name", "id")
     serializer_class = GenreSerializer
     permission_classes = [IsAdminOrReadOnly]
     lookup_field = "slug"
 
 
 class TagViewSet(viewsets.ModelViewSet):
-    queryset = Tag.objects.all()
+    queryset = Tag.objects.order_by("name", "id")
     serializer_class = TagSerializer
     permission_classes = [IsAdminOrReadOnly]
     lookup_field = "id"

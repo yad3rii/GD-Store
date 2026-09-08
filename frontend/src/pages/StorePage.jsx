@@ -1,3 +1,4 @@
+import { useAuthStore } from "../store/authStore";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -19,16 +20,17 @@ function SectionTitle({ eyebrow, title, link = "/?view=catalog" }) {
   );
 }
 export default function StorePage() {
+  const sessionId = useAuthStore(s => s.sessionId);
   const [params, setParams] = useSearchParams();
   const [slide, setSlide] = useState(0);
   const view = params.get("view") || "overview",
     search = params.get("search") || "",
     genre = params.get("genre") || "",
     order = params.get("ordering") || "",
-    page = Number(params.get("page") || 1);
+    page = Math.max(1, Math.floor(Number(params.get("page")) || 1));
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["games", search, genre, order, page],
-    queryFn: () => getGames({ search, genres: genre, ordering: order, page }),
+    queryKey: ["games", sessionId, search, genre, order, page, view === "sale"],
+    queryFn: ({signal}) => getGames({ search, genres: genre, ordering: order, page, ...(view === "sale" ? {on_sale: true} : {}) }, {signal}),
   });
   const { data: genreData } = useQuery({
     queryKey: ["genres"],
@@ -43,7 +45,7 @@ export default function StorePage() {
   const setFilter = (key, value) => {
     const next = new URLSearchParams(params);
     value ? next.set(key, value) : next.delete(key);
-    next.set("view", "catalog");
+    next.set("view", view === "sale" ? "sale" : "catalog");
     next.delete("page");
     setParams(next);
   };
@@ -66,7 +68,7 @@ export default function StorePage() {
     );
   if (view !== "overview" || search || genre) {
     const list =
-      view === "sale" ? games.filter((g) => g.discount_percent > 0) : games;
+      games;
     return (
       <section className="catalog-page">
         <p className="eyebrow">Найдите свою следующую историю</p>
@@ -80,7 +82,7 @@ export default function StorePage() {
             >
               <option value="">Все жанры</option>
               {genres.map((g) => (
-                <option key={g.id} value={g.id}>
+                <option key={g.id} value={g.slug}>
                   {g.name}
                 </option>
               ))}
@@ -93,8 +95,8 @@ export default function StorePage() {
               onChange={(e) => setFilter("ordering", e.target.value)}
             >
               <option value="">Рекомендуемые</option>
-              <option value="price">Сначала дешевле</option>
-              <option value="-price">Сначала дороже</option>
+              <option value="effective_price">Сначала дешевле</option>
+              <option value="-effective_price">Сначала дороже</option>
               <option value="-created_at">Сначала новые</option>
             </select>
           </label>
@@ -241,7 +243,7 @@ export default function StorePage() {
           {genres.slice(0, 4).map((g, i) => (
             <Link
               key={g.id}
-              to={`/?view=catalog&genre=${encodeURIComponent(g.id)}`}
+              to={`/?view=catalog&genre=${encodeURIComponent(g.slug)}`}
             >
               <Icon name={["spark", "arrow", "grid", "user"][i]} size={25} />
               <strong>{g.name}</strong>

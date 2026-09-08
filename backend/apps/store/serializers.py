@@ -64,6 +64,7 @@ class WishlistCreateSerializer(serializers.ModelSerializer):
 
 class CheckoutSerializer(serializers.Serializer):
     """Вход для POST /cart/checkout/."""
+    checkout_token = serializers.CharField(required=False, max_length=2048)
     promo_code = serializers.CharField(required=False, allow_blank=True, max_length=32)
     # Подарок другу: username получателя. Если не указан — покупка себе.
     recipient_username = serializers.CharField(required=False, allow_blank=True, max_length=150)

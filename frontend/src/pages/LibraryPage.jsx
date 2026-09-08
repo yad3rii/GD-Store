@@ -1,13 +1,19 @@
+import { useState } from "react";
+import { useAuthStore } from "../store/authStore";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getLibrary } from "../api/store";
 import GameCard from "../components/GameCard";
 import Icon from "../components/Icon";
 export default function LibraryPage() {
+  const [page, setPage] = useState(1);
+  const {accessToken, sessionId} = useAuthStore();
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["library"],
-    queryFn: getLibrary,
+    queryKey: ["library", sessionId, page],
+    queryFn: ({signal}) => getLibrary(page, {signal}),
+    enabled: Boolean(accessToken),
   });
+  if (!accessToken) return <div className="empty-state"><Link to="/login">Войдите, чтобы открыть библиотеку</Link></div>;
   return (
     <section className="catalog-page">
       <p className="eyebrow">Ваши миры всегда рядом</p>
@@ -38,6 +44,11 @@ export default function LibraryPage() {
           </Link>
         </div>
       )}
+      {(data?.next || data?.previous) && <div className="pagination">
+        <button disabled={!data.previous || isLoading} onClick={() => setPage(p => p - 1)}>Назад</button>
+        <span>Страница {page}</span>
+        <button disabled={!data.next || isLoading} onClick={() => setPage(p => p + 1)}>Далее</button>
+      </div>}
     </section>
   );
 }

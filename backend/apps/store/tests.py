@@ -481,3 +481,82 @@ class PurchaseConcurrencyTests(TransactionTestCase):
         self.assertEqual(PaymentAttempt.objects.filter(status=Payment.STATUS_SUCCEEDED).count(), 2)
         self.assertEqual(PaymentAttempt.objects.filter(review_required=True, review_reason="already_owned").count(), 1)
         self.assertEqual(LibraryEntry.objects.filter(user=recipient, game=game).count(), 1)
+
+
+class CartConfirmationTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="confirmed-cart", password="pass12345")
+        self.client.force_authenticate(self.user)
+        self.game = make_game("Confirmed Game", "10.00")
+        CartItem.objects.create(user=self.user, game=self.game)
+
+    def summary(self):
+        response = self.client.get("/api/v1/store/cart/summary/")
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_full_cart_summary_and_order_include_all_21_items(self):
+        for index in range(20):
+            CartItem.objects.create(user=self.user, game=make_game(f"Confirmed {index}", "10.00"))
+        data = self.summary()
+        self.assertEqual(len(data["results"]), 21)
+        self.assertEqual(data["count"], 21)
+        self.assertEqual(Decimal(data["total"]), Decimal("210.00"))
+        response = self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": data["checkout_token"]})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(len(response.data["items"]), 21)
+        self.assertEqual(Decimal(response.data["total"]), Decimal(data["total"]))
+
+    def test_changed_price_rejects_confirmation_and_preserves_cart(self):
+        token = self.summary()["checkout_token"]
+        Game.objects.filter(pk=self.game.pk).update(price=Decimal("99.00"))
+        response = self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": token})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(CartItem.objects.filter(user=self.user).count(), 1)
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+
+    def test_added_position_requires_new_confirmation(self):
+        token = self.summary()["checkout_token"]
+        CartItem.objects.create(user=self.user, game=make_game("New Position"))
+        self.assertEqual(self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": token}).status_code, 409)
+        self.assertEqual(CartItem.objects.filter(user=self.user).count(), 2)
+
+    def test_tampered_confirmation_is_rejected_without_creating_order(self):
+        self.assertEqual(self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": "tampered"}).status_code, 409)
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+
+    def test_confirmation_cannot_be_used_by_another_user(self):
+        token = self.summary()["checkout_token"]
+        other = get_user_model().objects.create(username="other-confirmed-cart")
+        CartItem.objects.create(user=other, game=self.game)
+        self.client.force_authenticate(other)
+        self.assertEqual(self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": token}).status_code, 409)
+        self.assertFalse(Order.objects.filter(user=other).exists())
+
+    def test_withdrawn_game_is_rejected_even_without_confirmation(self):
+        Game.objects.filter(pk=self.game.pk).update(is_published=False)
+        self.assertFalse(self.summary()["can_checkout"])
+        self.assertEqual(self.client.post("/api/v1/store/cart/checkout/").status_code, 409)
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+
+    def test_new_ownership_invalidates_confirmation(self):
+        token = self.summary()["checkout_token"]
+        LibraryEntry.objects.create(user=self.user, game=self.game)
+        self.assertFalse(self.summary()["can_checkout"])
+        self.assertEqual(self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": token}).status_code, 409)
+        self.assertTrue(CartItem.objects.filter(user=self.user).exists())
+
+    def test_order_response_uses_public_request_host_for_media(self):
+        Game.objects.filter(pk=self.game.pk).update(cover_image="games/covers/test.jpg")
+        summary = self.client.get("/api/v1/store/cart/summary/", HTTP_HOST="localhost:5173").data
+        response = self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": summary["checkout_token"]}, HTTP_HOST="localhost:5173")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["items"][0]["game"]["cover_image"], "http://localhost:5173/media/games/covers/test.jpg")
+
+    def test_expired_confirmation_requires_refresh(self):
+        from unittest.mock import patch
+        import time
+        token = self.summary()["checkout_token"]
+        with patch("django.core.signing.time.time", return_value=time.time() + 601):
+            response = self.client.post("/api/v1/store/cart/checkout/", {"checkout_token": token})
+        self.assertEqual(response.status_code, 409)

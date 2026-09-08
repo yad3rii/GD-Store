@@ -1,3 +1,4 @@
+import { createServer as createHttpServer } from "node:http";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { createServer } from "vite";
@@ -20,7 +21,7 @@ before(async () => {
   };
   server = await createServer({
     configFile: false,
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: {server: createHttpServer()} },
     appType: "custom",
   });
   ({ api } = await server.ssrLoadModule("/src/api/client.js"));
@@ -47,14 +48,14 @@ test("empty backend catalog stays empty and filters use the Django contract", as
   response = { results: [], count: 0, next: null, previous: null };
   assert.deepEqual(
     await catalog.getGames({
-      genres: "7",
+      genres: "action",
       search: "query",
       ordering: "-created_at",
     }),
     response,
   );
   assert.deepEqual(requests.at(-1).params, {
-    genres: "7",
+    genres: "action",
     search: "query",
     ordering: "-created_at",
   });
@@ -65,9 +66,9 @@ test("server failure is not replaced with demo games", async () => {
   await assert.rejects(() => catalog.getGames(), /offline/);
 });
 test("cart and library use backend data and cart additions send a game ID", async () => {
-  response = { results: [] };
+  response = { results: [], total: "0.00", checkout_token: "signed", can_checkout: false };
   assert.deepEqual(await store.getCart(), response);
-  assert.equal(requests.at(-1).url, "/store/cart/");
+  assert.equal(requests.at(-1).url, "/store/cart/summary/");
   await store.addToCart("server-game-id");
   assert.deepEqual(JSON.parse(requests.at(-1).data), {
     game: "server-game-id",
