@@ -1,29 +1,20 @@
-import { useAuthStore } from "../store/authStore";
-import { apiError } from "../api/contracts";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getCart, removeFromCart, checkout } from "../api/store";
 import Price, { formatPrice } from "../components/Price";
 import Icon from "../components/Icon";
 export default function CartPage() {
-  const {accessToken, sessionId} = useAuthStore();
   const qc = useQueryClient();
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["cart", sessionId],
-    enabled: Boolean(accessToken),
+    queryKey: ["cart"],
     queryFn: getCart,
   });
   const remove = useMutation({
     mutationFn: removeFromCart,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["cart"] }),
   });
-  const order = useMutation({
-    mutationFn: checkout,
-    onSuccess: () => qc.invalidateQueries({queryKey: ["cart"]}),
-    onError: (error) => { if (error.response?.status === 409) void qc.invalidateQueries({queryKey: ["cart"]}); },
-  });
+  const order = useMutation({ mutationFn: checkout });
   const items = data?.results || [];
-  if (!accessToken) return <div className="empty-state"><Link to="/login">Войдите, чтобы открыть корзину</Link></div>;
   if (isLoading)
     return (
       <div className="empty-state" role="status">
@@ -48,10 +39,6 @@ export default function CartPage() {
         Ваша корзина{" "}
         <span style={{ color: "var(--muted)" }}>({items.length})</span>
       </h1>
-      {order.isSuccess && <p role="status" className="status-message">
-        Заказ {order.data.id} создан на сумму {formatPrice(order.data.total)}. Оплата ещё не выполнена.
-      </p>}
-      {order.isError && <p role="alert" className="error-message">{apiError(order.error, "Не удалось оформить заказ.")}</p>}
       {items.length ? (
         <>
           {items.map((i) => (
@@ -61,12 +48,12 @@ export default function CartPage() {
                 <Link to={`/game/${i.game.slug}`}>
                   <h3>{i.game.title}</h3>
                 </Link>
-                <p className="game-genre">{i.unavailable_reason || "Игра для ПК"}</p>
+                <p className="game-genre">Игра для ПК</p>
               </div>
               <Price game={i.game} />
               <button
                 className="text-link"
-                disabled={remove.isPending || order.isPending}
+                disabled={remove.isPending}
                 onClick={() => remove.mutate(i.id)}
               >
                 Удалить
@@ -77,13 +64,15 @@ export default function CartPage() {
             <div>
               Итого{" "}
               <strong>
-                {formatPrice(data.total)}
+                {formatPrice(
+                  items.reduce((s, i) => s + Number(i.game.final_price), 0),
+                )}
               </strong>
             </div>
             <button
               className="button primary"
-              disabled={order.isPending || remove.isPending || !data.can_checkout}
-              onClick={() => order.mutate(data.checkout_token)}
+              disabled={order.isPending || order.isSuccess}
+              onClick={() => order.mutate()}
             >
               Оформить заказ <Icon name="arrow" />
             </button>
@@ -93,7 +82,16 @@ export default function CartPage() {
               Не удалось удалить игру. Попробуйте снова.
             </p>
           )}
-          {!data.can_checkout && <p role="alert">Удалите недоступные или уже приобретённые игры из корзины.</p>}
+          {order.isError && (
+            <p role="alert" className="error-message">
+              Не удалось оформить заказ. Попробуйте снова.
+            </p>
+          )}
+          {order.isSuccess && (
+            <p role="status" className="status-message">
+              Заказ создан. Статус оплаты уточняется на сервере.
+            </p>
+          )}
         </>
       ) : (
         <div className="empty-state">
