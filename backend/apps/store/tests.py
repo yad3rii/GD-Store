@@ -412,3 +412,72 @@ class PromoConcurrencyTests(TransactionTestCase):
         order.refresh_from_db()
         self.assertEqual(promo.times_used, 0)
         self.assertEqual(order.status, Order.STATUS_CANCELLED)
+
+
+class PurchaseConcurrencyTests(TransactionTestCase):
+    """Independent connections verify ownership serialization on SQL Server."""
+    def race(self, actions):
+        return PromoConcurrencyTests.race(self, actions)
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_two_buyers_gifting_same_game_have_only_one_pending_order(self):
+        recipient = get_user_model().objects.create(username="shared-recipient")
+        game = make_game("Shared Gift")
+        actions = []
+        for index in range(2):
+            buyer = get_user_model().objects.create(username=f"shared-buyer-{index}")
+            Friendship.objects.create(from_user=buyer, to_user=recipient, status="accepted")
+            CartItem.objects.create(user=buyer, game=game)
+            actions.append((buyer, "/api/v1/store/cart/checkout/", {"recipient_username": recipient.username}))
+        self.assertEqual(sorted(self.race(actions)), [201, 409])
+        self.assertEqual(Order.objects.filter(recipient=recipient).count(), 1)
+        self.assertEqual(CartItem.objects.count(), 1)
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_reciprocal_gifts_do_not_deadlock(self):
+        first = get_user_model().objects.create(username="reciprocal-a")
+        second = get_user_model().objects.create(username="reciprocal-b")
+        Friendship.objects.create(from_user=first, to_user=second, status="accepted")
+        CartItem.objects.create(user=first, game=make_game("Gift A"))
+        CartItem.objects.create(user=second, game=make_game("Gift B"))
+        actions = [(first, "/api/v1/store/cart/checkout/", {"recipient_username": second.username}),
+                   (second, "/api/v1/store/cart/checkout/", {"recipient_username": first.username})]
+        self.assertEqual(self.race(actions), [201, 201])
+        self.assertEqual(Order.objects.count(), 2)
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_two_legacy_successes_grant_once_and_record_second_for_review(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from django.db import connections
+        from apps.payments.models import Payment, PaymentAttempt
+        from apps.payments.services import apply_webhook
+        from .models import OrderItem
+        recipient = get_user_model().objects.create(username="legacy-shared-recipient")
+        game = make_game("Legacy Shared")
+        attempt_ids = []
+        for index in range(2):
+            buyer = get_user_model().objects.create(username=f"legacy-shared-buyer-{index}")
+            order = Order.objects.create(user=buyer, recipient=recipient, total=game.final_price)
+            OrderItem.objects.create(order=order, game=game, price_at_purchase=game.final_price)
+            provider_id = f"legacy-concurrent-{index}"
+            payment = Payment.objects.create(order=order, amount=order.total, provider_payment_id=provider_id)
+            PaymentAttempt.objects.create(payment=payment, provider="stripe", amount=order.total, provider_payment_id=provider_id)
+            attempt_ids.append(provider_id)
+        barrier = Barrier(2)
+
+        def run(provider_id):
+            try:
+                barrier.wait(timeout=10)
+                apply_webhook(provider_id, "succeeded", {"provider_payment_id": provider_id, "status": "succeeded"})
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run, provider_id) for provider_id in attempt_ids]
+            for future in futures:
+                future.result(timeout=30)
+        self.assertEqual(Order.objects.filter(status=Order.STATUS_PAID).count(), 1)
+        self.assertEqual(PaymentAttempt.objects.filter(status=Payment.STATUS_SUCCEEDED).count(), 2)
+        self.assertEqual(PaymentAttempt.objects.filter(review_required=True, review_reason="already_owned").count(), 1)
+        self.assertEqual(LibraryEntry.objects.filter(user=recipient, game=game).count(), 1)

@@ -100,7 +100,7 @@ class Order(models.Model):
     # Если оформляется подарок другу — recipient указан, и библиотека пополняется у него, а не у покупателя.
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL, related_name="gifted_orders",
-        null=True, blank=True, on_delete=models.SET_NULL,
+        null=True, blank=True, on_delete=models.PROTECT,
     )
     promo_code = models.ForeignKey(PromoCode, null=True, blank=True, on_delete=models.SET_NULL)
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_PENDING)

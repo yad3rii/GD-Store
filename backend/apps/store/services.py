@@ -1,6 +1,8 @@
 """Order closure and promo reservations; caller locks Order before PromoCode."""
+from django.contrib.auth import get_user_model
+from django.http import Http404
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -59,3 +61,41 @@ def expire_pending_orders(promo_id=None):
                     count += 1
         last_pk = ids[-1]
     return count
+
+
+def lock_order_participants(user_id, recipient_id):
+    """Caller is in atomic(). Always lock both parties in DB primary-key order.
+
+    Shared by checkout, payment creation, fulfillment and refund. Locking only
+    the beneficiary would deadlock two simultaneous reciprocal gifts on FK writes.
+    """
+    ids = {user_id, recipient_id or user_id}
+    locked = list(get_user_model().objects.select_for_update().filter(
+        pk__in=ids,
+    ).order_by("pk").values_list("pk", flat=True))
+    if set(locked) != ids:
+        raise Http404("Участник заказа больше недоступен.")
+
+
+def check_order_participants(order, user_id, recipient_id):
+    # The reference was read before locking; reject an unexpected reassignment.
+    if order.user_id != user_id or order.recipient_id != recipient_id:
+        raise ValidationError("Участники заказа изменились. Повторите запрос.")
+
+
+def pending_order_contains_games(beneficiary_id, game_ids):
+    return Order.objects.filter(
+        Q(recipient_id=beneficiary_id)
+        | Q(user_id=beneficiary_id, recipient__isnull=True),
+        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
+        status=Order.STATUS_PENDING,
+        items__game_id__in=game_ids,
+    ).exists()
+
+
+def beneficiary_already_owns_order_games(order):
+    from apps.library.models import LibraryEntry
+    return LibraryEntry.objects.filter(
+        user_id=order.recipient_id or order.user_id,
+        game_id__in=order.items.values_list("game_id", flat=True),
+    ).exists()

@@ -25,7 +25,10 @@ from .serializers import (
     WishlistSerializer,
 )
 from .throttles import CheckoutThrottle, OrderActionThrottle
-from .services import close_pending_order
+from .services import (
+    close_pending_order, lock_order_participants, check_order_participants,
+    pending_order_contains_games,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -91,6 +94,7 @@ class CartViewSet(viewsets.ModelViewSet):
         beneficiary = recipient or request.user
 
         with transaction.atomic():
+            lock_order_participants(request.user.pk, recipient.pk if recipient else None)
             items = list(
                 CartItem.objects
                 .select_for_update()
@@ -125,6 +129,15 @@ class CartViewSet(viewsets.ModelViewSet):
                         )
                     },
                     status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if pending_order_contains_games(
+                beneficiary.pk, [item.game_id for item in purchasable],
+            ):
+                return Response(
+                    {"detail": "Для получателя уже есть неоплаченный заказ с одной из этих игр. "
+                               "Оплатите или отмените его либо дождитесь истечения срока."},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             if promo is not None:
@@ -321,16 +334,20 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         from apps.payments.models import Payment
 
+        reference = self.get_object()
         with transaction.atomic():
+            lock_order_participants(reference.user_id, reference.recipient_id)
             order = (
                 Order.objects
                 .select_for_update()
                 .prefetch_related("items__game")
                 .get(
-                    pk=self.get_object().pk,
+                    pk=reference.pk,
                     user=request.user,
                 )
             )
+
+            check_order_participants(order, reference.user_id, reference.recipient_id)
 
             if order.status != Order.STATUS_PAID:
                 return Response(

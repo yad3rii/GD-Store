@@ -699,3 +699,137 @@ class PaymentAttemptBackfillTests(APITestCase):
             self.run_backfill()
         self.assertEqual(PaymentAttempt.objects.count(), 0)
         self.assertEqual(Payment.objects.count(), 2)
+
+
+@override_settings(PAYMENT_WEBHOOK_SECRET=TEST_WEBHOOK_SECRET)
+class PurchaseOwnershipTests(APITestCase):
+    def setUp(self):
+        self.buyer = User.objects.create_user(username="owner-buyer", password="pass12345")
+        self.other = User.objects.create_user(username="owner-other", password="pass12345")
+        self.recipient = User.objects.create_user(username="owner-recipient", password="pass12345")
+        for first, second in ((self.buyer, self.recipient), (self.other, self.recipient), (self.buyer, self.other)):
+            Friendship.objects.create(from_user=first, to_user=second, status="accepted")
+        self.game = Game.objects.create(title="Ownership", slug="ownership", price=Decimal("10.00"), is_published=True)
+        self.client.force_authenticate(self.buyer)
+
+    def checkout(self, buyer=None, recipient=None, extra=None):
+        buyer = buyer or self.buyer
+        self.client.force_authenticate(buyer)
+        CartItem.objects.get_or_create(user=buyer, game=self.game)
+        payload = dict(extra or {})
+        if recipient:
+            payload["recipient_username"] = recipient.username
+        return self.client.post("/api/v1/store/cart/checkout/", payload)
+
+    def legacy_order(self, recipient=None, games=None):
+        from apps.store.models import OrderItem
+        games = games or [self.game]
+        total = sum((game.final_price for game in games), Decimal("0.00"))
+        order = Order.objects.create(user=self.buyer, recipient=recipient, subtotal=total, total=total)
+        for game in games:
+            OrderItem.objects.create(order=order, game=game, price_at_purchase=game.final_price)
+        return order
+
+    def payment(self, order):
+        response = self.client.post("/api/v1/payments/create/", {"order_id": str(order.pk)})
+        self.assertEqual(response.status_code, 201, response.data)
+        return Payment.objects.get(order=order)
+
+    def success(self, payment):
+        body = json.dumps({"provider_payment_id": payment.provider_payment_id, "status": "succeeded"}).encode()
+        response = self.client.generic(
+            "POST", "/api/v1/payments/webhook/", data=body,
+            content_type="application/json", HTTP_X_SIGNATURE=sign(TEST_WEBHOOK_SECRET, body),
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_second_pending_checkout_is_rejected_without_spending_promo_or_cart(self):
+        from apps.store.models import PromoCode
+        promo = PromoCode.objects.create(code="DUP", discount_percent=10, max_uses=3)
+        self.assertEqual(self.checkout(extra={"promo_code": "DUP"}).status_code, 201)
+        self.assertEqual(self.checkout(extra={"promo_code": "DUP"}).status_code, 409)
+        promo.refresh_from_db()
+        self.assertEqual(promo.times_used, 1)
+        self.assertEqual(Order.objects.filter(user=self.buyer).count(), 1)
+        self.assertTrue(CartItem.objects.filter(user=self.buyer, game=self.game).exists())
+
+    def test_two_buyers_cannot_open_same_gift_for_one_recipient(self):
+        first = self.checkout(recipient=self.recipient)
+        self.assertEqual(first.status_code, 201, first.data)
+        second = self.checkout(buyer=self.other, recipient=self.recipient)
+        self.assertEqual(second.status_code, 409, second.data)
+        self.assertNotIn(str(first.data["id"]), str(second.data))
+        self.assertTrue(CartItem.objects.filter(user=self.other, game=self.game).exists())
+
+    def test_same_game_for_different_recipients_is_allowed(self):
+        self.assertEqual(self.checkout(recipient=self.recipient).status_code, 201)
+        self.assertEqual(self.checkout(recipient=self.other).status_code, 201)
+        self.assertEqual(self.checkout().status_code, 201)
+
+    def test_cancelled_order_does_not_block_new_checkout(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(self.client.post(f"/api/v1/store/orders/{first.data['id']}/cancel/").status_code, 200)
+        self.assertEqual(self.checkout().status_code, 201)
+
+    def test_expired_reservation_does_not_block_new_checkout(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201)
+        Order.objects.filter(pk=first.data["id"]).update(expires_at=timezone.now() - timedelta(seconds=1))
+        self.assertEqual(self.checkout().status_code, 201)
+
+    def test_old_duplicate_orders_cannot_both_be_fulfilled(self):
+        first, second = self.legacy_order(), self.legacy_order()
+        p1, p2 = self.payment(first), self.payment(second)
+        self.success(p1)
+        self.success(p2)
+        self.success(p2)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.status, Order.STATUS_PAID)
+        self.assertEqual(second.status, Order.STATUS_PENDING)
+        attempt = p2.attempts.get()
+        self.assertEqual(attempt.status, Payment.STATUS_SUCCEEDED)
+        self.assertEqual(attempt.review_reason, "already_owned")
+        self.assertTrue(attempt.review_required)
+        self.assertEqual(LibraryEntry.objects.filter(user=self.buyer, game=self.game).count(), 1)
+
+    def test_cannot_start_payment_if_recipient_now_owns_game(self):
+        order = self.legacy_order(recipient=self.recipient)
+        LibraryEntry.objects.create(user=self.recipient, game=self.game)
+        response = self.client.post("/api/v1/payments/create/", {"order_id": str(order.pk)})
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(Payment.objects.filter(order=order).exists())
+
+    def test_mixed_old_order_goes_to_review_without_partial_grant(self):
+        game2 = Game.objects.create(title="Another", slug="another-owned-test", price=Decimal("7.00"), is_published=True)
+        order = self.legacy_order(games=[self.game, game2])
+        payment = self.payment(order)
+        LibraryEntry.objects.create(user=self.buyer, game=self.game)
+        self.success(payment)
+        self.assertTrue(payment.attempts.get().review_required)
+        self.assertFalse(LibraryEntry.objects.filter(user=self.buyer, game=game2).exists())
+        order.refresh_from_db()
+        self.assertEqual(order.total, Decimal("17.00"))
+        self.assertEqual(order.items.count(), 2)
+
+    def test_refunded_purchase_can_be_bought_again(self):
+        order = self.legacy_order()
+        self.success(self.payment(order))
+        self.assertEqual(self.client.post(f"/api/v1/store/orders/{order.pk}/refund/").status_code, 200)
+        response = self.checkout()
+        self.assertEqual(response.status_code, 201, response.data)
+        self.success(self.payment(Order.objects.get(pk=response.data["id"])))
+        self.assertEqual(LibraryEntry.objects.filter(user=self.buyer, game=self.game).count(), 1)
+
+    def test_recipient_deletion_cannot_redirect_existing_gift(self):
+        from django.db.models.deletion import ProtectedError
+        order = self.legacy_order(recipient=self.recipient)
+        payment = self.payment(order)
+        with self.assertRaises(ProtectedError):
+            self.recipient.delete()
+        self.success(payment)
+        self.assertTrue(LibraryEntry.objects.filter(user=self.recipient, game=self.game).exists())
+        self.assertFalse(LibraryEntry.objects.filter(user=self.buyer, game=self.game).exists())

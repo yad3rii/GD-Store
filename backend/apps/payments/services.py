@@ -1,4 +1,4 @@
-"""Payment transitions. Lock order: Order -> Payment -> PaymentAttempt."""
+"""Payment transitions. Lock order: sorted users -> Order -> Payment -> PaymentAttempt."""
 import logging
 
 from django.db import transaction
@@ -6,7 +6,10 @@ from django.shortcuts import get_object_or_404
 
 from apps.library.models import LibraryEntry
 from apps.store.models import Order
-from apps.store.services import expire_order_if_due
+from apps.store.services import (
+    expire_order_if_due, lock_order_participants, check_order_participants,
+    beneficiary_already_owns_order_games,
+)
 from .models import Payment, PaymentAttempt
 
 logger = logging.getLogger(__name__)
@@ -35,13 +38,20 @@ def ensure_current_attempt(payment):
 
 def apply_webhook(provider_payment_id, incoming_status, payload):
     reference = get_object_or_404(
-        PaymentAttempt.objects.values("id", "payment_id", "payment__order_id"),
+        PaymentAttempt.objects.values(
+            "id", "payment_id", "payment__order_id",
+            "payment__order__user_id", "payment__order__recipient_id",
+        ),
         provider_payment_id=provider_payment_id,
     )
     with transaction.atomic():
+        user_id = reference["payment__order__user_id"]
+        recipient_id = reference["payment__order__recipient_id"]
+        lock_order_participants(user_id, recipient_id)
         order = get_object_or_404(
             Order.objects.select_for_update(), pk=reference["payment__order_id"],
         )
+        check_order_participants(order, user_id, recipient_id)
         payment = get_object_or_404(
             Payment.objects.select_for_update(),
             pk=reference["payment_id"], order_id=order.pk,
@@ -81,6 +91,8 @@ def apply_webhook(provider_payment_id, incoming_status, payload):
             reason = "order_not_payable"
         elif attempt.amount != order.total:
             reason = "amount_mismatch"
+        elif beneficiary_already_owns_order_games(order):
+            reason = "already_owned"
         else:
             reason = ""
 

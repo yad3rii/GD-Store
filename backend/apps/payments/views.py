@@ -13,7 +13,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.store.models import Order
-from apps.store.services import expire_order_if_due
+from apps.store.services import (
+    expire_order_if_due, lock_order_participants, check_order_participants,
+    beneficiary_already_owns_order_games,
+)
 
 from .models import Payment
 from .services import apply_webhook, ensure_current_attempt
@@ -41,13 +44,16 @@ class CreatePaymentView(CreateAPIView):
 
         order_id = serializer.validated_data["order_id"]
 
+        reference = get_object_or_404(Order, id=order_id, user=request.user)
         with transaction.atomic():
+            lock_order_participants(reference.user_id, reference.recipient_id)
             order = get_object_or_404(
                 Order.objects.select_for_update(),
                 id=order_id,
                 user=request.user,
             )
 
+            check_order_participants(order, reference.user_id, reference.recipient_id)
             if expire_order_if_due(order):
                 return Response(
                     {"detail": "Срок оплаты заказа истёк."},
@@ -63,6 +69,13 @@ class CreatePaymentView(CreateAPIView):
                         )
                     },
                     status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if beneficiary_already_owns_order_games(order):
+                return Response(
+                    {"detail": "Получатель уже владеет игрой из этого заказа. "
+                               "Отмените заказ и оформите оставшиеся игры отдельно."},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             payment, created = Payment.objects.get_or_create(
