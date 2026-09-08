@@ -366,3 +366,128 @@ class PaymentsTestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assert_payment_unchanged(payment)
+    def test_active_payment_keeps_checkout_url_and_first_webhook_valid(self):
+        first = self.client.post(
+            "/api/v1/payments/create/", {"order_id": str(self.order.id)}
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        payment = Payment.objects.get(order=self.order)
+        original_id = payment.provider_payment_id
+        original_updated_at = payment.updated_at
+        second = self.client.post(
+            "/api/v1/payments/create/", {"order_id": str(self.order.id)}
+        )
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
+        self.assertEqual(first.data["checkout_url"], second.data["checkout_url"])
+        payment.refresh_from_db()
+        self.assertEqual(payment.provider_payment_id, original_id)
+        self.assertEqual(payment.updated_at, original_updated_at)
+        response = self.post_webhook({
+            "provider_payment_id": original_id, "status": "succeeded",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.STATUS_PAID)
+        self.assertEqual(LibraryEntry.objects.filter(
+            user=self.user, game=self.game,
+        ).count(), 1)
+
+    def test_active_payment_request_does_not_rewrite_amount_or_payload(self):
+        payment = self.create_payment()
+        payment.raw_payload = {"audit_marker": "preserve"}
+        payment.save(update_fields=["raw_payload"])
+        original_amount = payment.amount
+        repeated = self.create_payment()
+        self.assertEqual(repeated.amount, original_amount)
+        self.assertEqual(repeated.raw_payload, {"audit_marker": "preserve"})
+        self.assertEqual(repeated.provider_payment_id, payment.provider_payment_id)
+
+    def test_failed_attempt_still_allows_retry_and_success(self):
+        payment = self.create_payment()
+        response = self.post_webhook({
+            "provider_payment_id": payment.provider_payment_id, "status": "failed",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        retried = self.create_payment()
+        self.assertEqual(retried.pk, payment.pk)
+        self.assertNotEqual(retried.provider_payment_id, payment.provider_payment_id)
+        self.assertEqual(retried.status, Payment.STATUS_CREATED)
+        response = self.post_webhook({
+            "provider_payment_id": retried.provider_payment_id, "status": "succeeded",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.STATUS_PAID)
+
+    def test_failed_webhook_cannot_undo_success(self):
+        payment = self.create_payment()
+        success = {"provider_payment_id": payment.provider_payment_id, "status": "succeeded"}
+        self.assertEqual(self.post_webhook(success).status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        updated_at = payment.updated_at
+        response = self.post_webhook({
+            "provider_payment_id": payment.provider_payment_id, "status": "failed",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.order.refresh_from_db()
+        self.assertEqual(payment.status, Payment.STATUS_SUCCEEDED)
+        self.assertEqual(payment.raw_payload, success)
+        self.assertEqual(payment.updated_at, updated_at)
+        self.assertEqual(self.order.status, Order.STATUS_PAID)
+        self.assertTrue(LibraryEntry.objects.filter(user=self.user, game=self.game).exists())
+
+    def test_late_webhooks_cannot_undo_refund(self):
+        payment = self.create_payment()
+        success = {"provider_payment_id": payment.provider_payment_id, "status": "succeeded"}
+        self.assertEqual(self.post_webhook(success).status_code, status.HTTP_200_OK)
+        refund = self.client.post(f"/api/v1/store/orders/{self.order.id}/refund/")
+        self.assertEqual(refund.status_code, status.HTTP_200_OK, refund.data)
+        payment.refresh_from_db()
+        updated_at = payment.updated_at
+        for incoming_status in ("succeeded", "failed", "succeeded"):
+            with self.subTest(status=incoming_status):
+                response = self.post_webhook({
+                    "provider_payment_id": payment.provider_payment_id,
+                    "status": incoming_status,
+                })
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                payment.refresh_from_db()
+                self.order.refresh_from_db()
+                self.assertEqual(payment.status, Payment.STATUS_REFUNDED)
+                self.assertEqual(self.order.status, Order.STATUS_REFUNDED)
+                self.assertEqual(payment.raw_payload, success)
+                self.assertEqual(payment.updated_at, updated_at)
+                self.assertFalse(LibraryEntry.objects.filter(
+                    user=self.user, game=self.game,
+                ).exists())
+        recreate = self.client.post(
+            "/api/v1/payments/create/", {"order_id": str(self.order.id)}
+        )
+        self.assertEqual(recreate.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_expired_order_cannot_reopen_active_payment(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        payment = self.create_payment()
+        Order.objects.filter(pk=self.order.pk).update(
+            expires_at=timezone.now() - timedelta(seconds=1),
+        )
+        response = self.client.post(
+            "/api/v1/payments/create/", {"order_id": str(self.order.id)}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        unchanged = Payment.objects.get(pk=payment.pk)
+        self.assertEqual(unchanged.provider_payment_id, payment.provider_payment_id)
+        self.assertEqual(unchanged.updated_at, payment.updated_at)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.STATUS_EXPIRED)
+
+    def test_legacy_payment_without_provider_id_gets_stable_checkout(self):
+        legacy = Payment.objects.create(order=self.order, amount=self.order.total)
+        first = self.create_payment()
+        second = self.create_payment()
+        self.assertEqual(first.pk, legacy.pk)
+        self.assertTrue(first.provider_payment_id)
+        self.assertEqual(first.provider_payment_id, second.provider_payment_id)

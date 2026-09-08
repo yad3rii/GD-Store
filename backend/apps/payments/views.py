@@ -101,15 +101,21 @@ class CreatePaymentView(CreateAPIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Для created/failed создаём новую попытку оплаты.
-            payment.status = Payment.STATUS_CREATED
-            payment.amount = order.total
-            payment.provider_payment_id = uuid.uuid4().hex
-            payment.raw_payload = {}
-            payment.save()
+            # Повторный запрос должен вернуть действующую попытку без изменений.
+            # Пустой ID возможен у старых записей, созданных вне этого endpoint.
+            if (
+                created
+                or payment.status == Payment.STATUS_FAILED
+                or not payment.provider_payment_id
+            ):
+                payment.status = Payment.STATUS_CREATED
+                payment.amount = order.total
+                payment.provider_payment_id = uuid.uuid4().hex
+                payment.raw_payload = {}
+                payment.save()
 
         logger.info(
-            "Payment %s created for order %s by user %s",
+            "Payment %s checkout returned for order %s to user %s",
             payment.id,
             order.id,
             request.user.id,
@@ -176,18 +182,32 @@ class PaymentWebhookView(APIView):
             "status"
         ]
 
+        # Поиск связи без блокировки. Все денежные операции берут locks
+        # в одном порядке: Order -> Payment (как create и refund).
+        payment_ref = get_object_or_404(
+            Payment.objects.only("id", "order_id"),
+            provider_payment_id=provider_payment_id,
+        )
+
         with transaction.atomic():
+            order = get_object_or_404(
+                Order.objects.select_for_update(),
+                pk=payment_ref.order_id,
+            )
+            # За время ожидания lock могла начаться другая попытка.
+            # Перепроверяем ID и связь, а не используем устаревший объект.
             payment = get_object_or_404(
                 Payment.objects.select_for_update(),
+                pk=payment_ref.pk,
+                order_id=order.pk,
                 provider_payment_id=provider_payment_id,
             )
 
-            order = Order.objects.select_for_update().get(
-                pk=payment.order_id
-            )
-
-            # Повторный successful webhook ничего не делает.
-            if payment.status == Payment.STATUS_SUCCEEDED:
+            # Задержавшееся failed/succeeded не отменяет успех или возврат.
+            if payment.status in (
+                Payment.STATUS_SUCCEEDED,
+                Payment.STATUS_REFUNDED,
+            ):
                 return Response(
                     status=status.HTTP_200_OK
                 )
@@ -270,10 +290,10 @@ class PaymentWebhookView(APIView):
             beneficiary = order.beneficiary
 
             for item in order.items.all():
-             LibraryEntry.objects.get_or_create(
-                 user=beneficiary,
-                 game_id=item.game_id,
-             )
+                LibraryEntry.objects.get_or_create(
+                    user=beneficiary,
+                    game_id=item.game_id,
+                )
 
         logger.info(
             "Payment %s succeeded, "
